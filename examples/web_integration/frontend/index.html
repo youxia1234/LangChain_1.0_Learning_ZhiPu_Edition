@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 资料检索助手</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .chat-container {
+            width: 100%;
+            max-width: 800px;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            height: 90vh;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chat-header h1 {
+            font-size: 1.5rem;
+        }
+
+        .clear-btn {
+            background: rgba(255,255,255,0.2);
+            border: none;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: background 0.3s;
+        }
+
+        .clear-btn:hover {
+            background: rgba(255,255,255,0.3);
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .message {
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            line-height: 1.5;
+        }
+
+        .message-user {
+            align-self: flex-end;
+            background: #667eea;
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message-assistant {
+            align-self: flex-start;
+            background: #f0f0f0;
+            color: #333;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message-tool {
+            align-self: flex-start;
+            background: #e3f2fd;
+            color: #1976d2;
+            font-size: 0.9rem;
+            border-left: 4px solid #1976d2;
+            padding: 8px 12px;
+        }
+
+        .message-input-area {
+            padding: 20px;
+            border-top: 1px solid #e0e0e0;
+            display: flex;
+            gap: 12px;
+        }
+
+        .message-input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 24px;
+            font-size: 1rem;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+
+        .message-input:focus {
+            border-color: #667eea;
+        }
+
+        .send-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            color: white;
+            padding: 12px 32px;
+            border-radius: 24px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+
+        .send-btn:hover:not(:disabled) {
+            transform: scale(1.05);
+        }
+
+        .send-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+            color: #999;
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        .typing-indicator {
+            display: inline-flex;
+            gap: 4px;
+        }
+
+        .typing-indicator span {
+            width: 8px;
+            height: 8px;
+            background: #667eea;
+            border-radius: 50%;
+            animation: typing 1.4s infinite;
+        }
+
+        .typing-indicator span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-indicator span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes typing {
+            0%, 60%, 100% {
+                transform: translateY(0);
+            }
+            30% {
+                transform: translateY(-10px);
+            }
+        }
+
+        .welcome-message {
+            text-align: center;
+            padding: 40px 20px;
+            color: #666;
+        }
+
+        .welcome-message h2 {
+            margin-bottom: 16px;
+            color: #333;
+        }
+
+        .welcome-suggestions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            justify-content: center;
+            margin-top: 20px;
+        }
+
+        .suggestion-btn {
+            background: #f0f0f0;
+            border: 2px solid #e0e0e0;
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.3s;
+        }
+
+        .suggestion-btn:hover {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>AI 资料检索助手</h1>
+            <button class="clear-btn" onclick="clearChat()">清除对话</button>
+        </div>
+
+        <div class="chat-messages" id="messages">
+            <div class="welcome-message" id="welcome">
+                <h2>你好！我是你的智能资料检索助手</h2>
+                <p>我可以帮你搜索资料、执行计算、回答问题</p>
+                <div class="welcome-suggestions">
+                    <button class="suggestion-btn" onclick="sendSuggestion('搜索产品手册')">搜索产品手册</button>
+                    <button class="suggestion-btn" onclick="sendSuggestion('计算 25 乘以 8')">计算示例</button>
+                    <button class="suggestion-btn" onclick="sendSuggestion('查找技术文档')">查找文档</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="loading" id="loading">
+            <div class="typing-indicator">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+        </div>
+
+        <div class="message-input-area">
+            <input
+                type="text"
+                class="message-input"
+                id="userInput"
+                placeholder="输入你的问题..."
+                onkeypress="handleKeyPress(event)"
+            >
+            <button class="send-btn" id="sendBtn" onclick="sendMessage()">发送</button>
+        </div>
+    </div>
+
+    <script>
+        // API 配置
+        const API_URL = 'http://localhost:8000';
+
+        // 会话管理
+        let sessionId = 'session_' + Date.now();
+        let conversationHistory = [];
+
+        // 发送消息
+        async function sendMessage() {
+            const input = document.getElementById('userInput');
+            const message = input.value.trim();
+
+            if (!message) return;
+
+            // 隐藏欢迎消息
+            document.getElementById('welcome').style.display = 'none';
+
+            // 添加用户消息
+            addMessage(message, 'user');
+            input.value = '';
+
+            // 显示加载状态
+            setLoading(true);
+
+            try {
+                const response = await fetch(`${API_URL}/chat`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        message: message,
+                        session_id: sessionId
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error('API 请求失败');
+                }
+
+                const data = await response.json();
+
+                // 显示使用的工具
+                if (data.tools_used && data.tools_used.length > 0) {
+                    addMessage(`使用工具: ${data.tools_used.join(', ')}`, 'tool');
+                }
+
+                // 显示 AI 回答
+                addMessage(data.answer, 'assistant');
+
+            } catch (error) {
+                console.error('错误:', error);
+                addMessage('抱歉，出现错误，请稍后重试', 'assistant');
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        // 流式发送消息（高级用法）
+        async function sendStreamMessage() {
+            const input = document.getElementById('userInput');
+            const message = input.value.trim();
+
+            if (!message) return;
+
+            addMessage(message, 'user');
+            input.value = '';
+
+            setLoading(true);
+
+            try {
+                const response = await fetch(`${API_URL}/chat/stream`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        message: message,
+                        session_id: sessionId
+                    })
+                });
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let currentAnswer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value);
+                    const lines = chunk.split('\n');
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const data = JSON.parse(line.slice(6));
+
+                            if (data.error) {
+                                addMessage(`错误: ${data.error}`, 'assistant');
+                                break;
+                            }
+
+                            if (data.type === 'tool_call') {
+                                addMessage(`调用工具: ${data.tool}`, 'tool');
+                            } else if (data.type === 'answer') {
+                                currentAnswer += data.content;
+                                // 实时更新当前消息
+                            }
+                        }
+                    }
+                }
+
+                if (currentAnswer) {
+                    addMessage(currentAnswer, 'assistant');
+                }
+
+            } catch (error) {
+                console.error('流式错误:', error);
+                addMessage('抱歉，出现错误', 'assistant');
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        // 添加消息到界面
+        function addMessage(content, type) {
+            const messagesDiv = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message message-${type}`;
+            messageDiv.textContent = content;
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+            // 保存历史
+            conversationHistory.push({ type, content });
+        }
+
+        // 设置加载状态
+        function setLoading(loading) {
+            const loadingDiv = document.getElementById('loading');
+            const sendBtn = document.getElementById('sendBtn');
+
+            if (loading) {
+                loadingDiv.classList.add('active');
+                sendBtn.disabled = true;
+            } else {
+                loadingDiv.classList.remove('active');
+                sendBtn.disabled = false;
+            }
+        }
+
+        // 清除对话
+        async function clearChat() {
+            try {
+                await fetch(`${API_URL}/sessions/${sessionId}`, {
+                    method: 'DELETE'
+                });
+
+                // 重置界面
+                sessionId = 'session_' + Date.now();
+                conversationHistory = [];
+                document.getElementById('messages').innerHTML = `
+                    <div class="welcome-message" id="welcome">
+                        <h2>你好！我是你的智能资料检索助手</h2>
+                        <p>我可以帮你搜索资料、执行计算、回答问题</p>
+                        <div class="welcome-suggestions">
+                            <button class="suggestion-btn" onclick="sendSuggestion('搜索产品手册')">搜索产品手册</button>
+                            <button class="suggestion-btn" onclick="sendSuggestion('计算 25 乘以 8')">计算示例</button>
+                            <button class="suggestion-btn" onclick="sendSuggestion('查找技术文档')">查找文档</button>
+                        </div>
+                    </div>
+                `;
+
+            } catch (error) {
+                console.error('清除失败:', error);
+                alert('清除对话失败');
+            }
+        }
+
+        // 发送建议问题
+        function sendSuggestion(text) {
+            document.getElementById('userInput').value = text;
+            sendMessage();
+        }
+
+        // 回车发送
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+    </script>
+</body>
+</html>
