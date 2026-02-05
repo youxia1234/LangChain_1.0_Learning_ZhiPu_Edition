@@ -4,6 +4,15 @@
 
 本模块将帮助你理解 LangGraph 1.0 的核心概念，学会创建状态图来构建复杂的 AI 工作流。
 
+## 🚀 环境要求
+
+```bash
+# 需要配置的环境变量
+ZHIPUAI_API_KEY=your_zhipuai_api_key_here
+```
+
+获取 API Key: https://open.bigmodel.cn/usercenter/apikeys
+
 ## 📚 核心概念
 
 ### 什么是 LangGraph？
@@ -53,6 +62,18 @@ result = app.invoke({"messages": [], "current_step": "start"})
 ```
 
 ## 🔑 关键 API
+
+### 模型初始化（智谱 AI）
+
+```python
+from langchain_openai import ChatOpenAI
+
+model = ChatOpenAI(
+    model="glm-4-flash",
+    api_key=os.getenv("ZHIPUAI_API_KEY"),
+    base_url="https://open.bigmodel.cn/api/paas/v4/"
+)
+```
 
 ### StateGraph
 
@@ -129,3 +150,48 @@ result = app.invoke(input_data, config=config)
 2. 使用 `add_messages` 注解时，消息会自动追加
 3. 条件函数必须返回有效的节点名称字符串
 4. 编译后的图是不可变的，需要修改时重新编译
+
+---
+
+## ❓ 常见问题
+
+### Q1: Windows 上运行时 emoji 显示乱码怎么办？
+
+**A:** 这是 Windows 终端 GBK 编码问题。在代码开头添加：
+
+```python
+import sys
+import io
+
+# 设置 UTF-8 编码输出（解决 Windows emoji 显示问题）
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+```
+
+### Q2: 为什么使用智谱 AI 而不是 Groq？
+
+**A:**
+
+| 特性 | Groq | 智谱 AI |
+|-----|------|---------|
+| 费用 | 完全免费 | 有免费额度 |
+| 速度 | 极快 | 快 |
+| 中文支持 | 一般 | **优秀** |
+| LangGraph 兼容性 | 良好 | **完全兼容** |
+| 国内网络 | 需代理 | **直接访问** |
+
+### Q3: LangGraph 和 LangChain Agent 的区别？
+
+**A:**
+
+| 特性 | LangChain Agent | LangGraph |
+|------|-----------------|-----------|
+| 抽象级别 | 高级（开箱即用）| 低级（完全控制）|
+| 使用场景 | 标准 Agent 应用 | 复杂自定义工作流 |
+| 控制粒度 | 通过 `create_agent` | 每个节点自定义 |
+| 学习曲线 | 简单 | 较陡 |
+
+**选择建议**：
+- 简单需求 → `create_agent`（模块 5、15）
+- 复杂工作流 → `StateGraph`（本模块）

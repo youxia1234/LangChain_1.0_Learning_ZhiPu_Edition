@@ -82,15 +82,47 @@ async def main():
 ```python
 @tool
 def safe_tool(query: str) -> str:
-    """带错误处理的工具"""
+    """带错误处理的工具（推荐方式）"""
     try:
         # 可能失败的操作
         result = risky_operation(query)
         return result
     except ValueError as e:
-        return f"参数错误: {e}"
+        return f"⚠️ 参数错误: {e}"
     except Exception as e:
-        return f"工具执行失败: {e}"
+        return f"⚠️ 工具执行失败: {e}"
+
+# 带重试机制的包装器
+def with_retry(tool_func, max_retries: int = 3):
+    """添加重试逻辑的包装器"""
+    def wrapper(*args, **kwargs):
+        for attempt in range(max_retries):
+            result = tool_func.invoke(*args, **kwargs)
+            if "⚠️" not in result or attempt == max_retries - 1:
+                return result
+            print(f"  重试 {attempt + 1}/{max_retries}...")
+            time.sleep(0.1)
+        return result
+    return wrapper
+```
+
+### 4. 模型初始化（智谱 AI）
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain.agents import create_agent
+
+model = ChatOpenAI(
+    model="glm-4-flash",
+    api_key=os.getenv("ZHIPUAI_API_KEY"),
+    base_url="https://open.bigmodel.cn/api/paas/v4/"
+)
+
+agent = create_agent(
+    model=model,
+    tools=[tool1, tool2],
+    system_prompt="你是一个专业的助手。"
+)
 ```
 
 ---
@@ -110,6 +142,17 @@ def safe_tool(query: str) -> str:
 ---
 
 ## 🚀 运行方式
+
+### 环境要求
+
+```bash
+# 需要配置的环境变量
+ZHIPUAI_API_KEY=your_zhipuai_api_key_here
+```
+
+获取 API Key: https://open.bigmodel.cn/usercenter/apikeys
+
+### 运行代码
 
 ```bash
 cd phase2_practical/15_tools_and_agents
@@ -135,27 +178,35 @@ python main.py
 ### 带验证的工具
 
 ```python
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from langchain_core.tools import tool
 
-class EmailInput(BaseModel):
-    """邮件发送参数"""
-    to: str = Field(description="收件人邮箱")
-    subject: str = Field(description="邮件主题")
-    body: str = Field(description="邮件正文")
+# 方式一：简单验证（在工具内部）
+class WeatherInput(BaseModel):
+    """天气查询参数"""
+    city: str = Field(description="城市名称")
+    unit: str = Field(default="celsius", description="温度单位: celsius 或 fahrenheit")
 
-    @field_validator('to')
-    @classmethod
-    def validate_email(cls, v):
-        if '@' not in v:
-            raise ValueError('无效的邮箱地址')
-        return v
+@tool(args_schema=WeatherInput)
+def get_weather(city: str, unit: str = "celsius") -> str:
+    """获取指定城市的天气信息。"""
+    # 在工具内部验证参数（兼容 Pydantic V1/V2）
+    if unit not in ["celsius", "fahrenheit"]:
+        return "错误: unit 必须是 'celsius' 或 'fahrenheit'"
+    return f"{city}天气: 晴, 温度: 25°C"
 
-@tool(args_schema=EmailInput)
-def send_email(to: str, subject: str, body: str) -> str:
-    """发送邮件（带参数验证）"""
-    # 验证已由 Pydantic 自动完成
-    return f"邮件已发送至 {to}"
+# 方式二：使用 StructuredTool（完全控制）
+from langchain_core.tools import StructuredTool
+
+def translate_text(text: str, target_lang: str) -> str:
+    """翻译文本（模拟）"""
+    return f"[{target_lang}] {text}"
+
+translate_tool = StructuredTool.from_function(
+    func=translate_text,
+    name="translate",
+    description="将文本翻译成指定语言。支持: en, ja, ko",
+)
 ```
 
 ### Agent 回调监控
@@ -233,7 +284,7 @@ def safe_tool(x: str) -> str:
 agent = create_agent(
     model=model,
     tools=[...],
-    prompt="如果工具失败，尝试使用其他方法解决问题。"
+    system_prompt="如果工具失败，尝试使用其他方法解决问题。"
 )
 
 # 3. 调用级重试
@@ -243,6 +294,53 @@ from tenacity import retry, stop_after_attempt
 def call_agent(question):
     return agent.invoke({"messages": [{"role": "user", "content": question}]})
 ```
+
+### Q4: Windows 上运行时 emoji 显示乱码怎么办？
+
+**A:** 这是 Windows 终端 GBK 编码问题。在代码开头添加：
+
+```python
+import sys
+import io
+
+# 设置 UTF-8 编码输出（解决 Windows emoji 显示问题）
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+```
+
+### Q5: 为什么不用 `handle_tool_error` 参数？
+
+**A:** `@tool` 装饰器不支持 `handle_tool_error` 参数（这是 LangChain 早期版本的写法）。
+
+**推荐方式**：在工具内部使用 try/except 处理错误：
+
+```python
+# ❌ 错误（不支持）
+@tool(handle_tool_error=True)
+def my_tool(x: str) -> str:
+    ...
+
+# ✅ 正确（工具内处理）
+@tool
+def my_tool(x: str) -> str:
+    try:
+        return risky_operation(x)
+    except Exception as e:
+        return f"⚠️ 错误: {e}"
+```
+
+### Q6: 为什么使用智谱 AI 而不是 Groq？
+
+**A:**
+
+| 特性 | Groq | 智谱 AI |
+|-----|------|---------|
+| 费用 | 完全免费 | 有免费额度 |
+| 速度 | 极快 | 快 |
+| 中文支持 | 一般 | **优秀** |
+| 工具调用稳定性 | 良好 | **更好** |
+| 国内网络 | 需代理 | **直接访问** |
 
 ---
 
