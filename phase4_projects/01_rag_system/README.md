@@ -14,6 +14,18 @@
 - 添加来源引用和置信度评估
 - 优化检索质量和生成效果
 
+## 🚀 环境要求
+
+```bash
+# 需要配置的环境变量
+ZHIPUAI_API_KEY=your_zhipuai_api_key_here
+OPENAI_API_KEY=your_openai_api_key_here  # 可选，用于高质量 Embeddings
+```
+
+获取 API Keys:
+- Zhipu AI: https://open.bigmodel.cn/usercenter/apikeys
+- OpenAI: https://platform.openai.com/ (可选，用于更好的 Embeddings)
+
 ## 🏗️ 系统架构
 
 ```
@@ -109,6 +121,83 @@ python main.py
 3. **提示工程**: 设计清晰的提示模板
 4. **错误处理**: 实现完善的错误处理机制
 5. **性能监控**: 使用 LangSmith 追踪系统性能
+
+## ❓ 常见问题
+
+### Q1: Windows 上运行时 emoji 显示乱码怎么办？
+
+**A:** 这是 Windows 终端 GBK 编码问题。在代码开头添加：
+
+```python
+import sys
+import io
+
+# 设置 UTF-8 编码输出（解决 Windows emoji 显示问题）
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+```
+
+### Q2: 为什么使用智谱 AI 而不是 Groq？
+
+**A:**
+
+| 特性 | Groq | 智谱 AI |
+|-----|------|---------|
+| 费用 | 完全免费 | 有免费额度 |
+| 速度 | 极快 | 快 |
+| 中文支持 | 一般 | **优秀** |
+| RAG 场景 | 良好 | **更适合中文文档问答** |
+| 国内网络 | 需代理 | **直接访问** |
+
+### Q3: 如何选择合适的 chunk_size？
+
+**A:** 根据文档类型和需求选择：
+
+```python
+# 短文档（如新闻、通知）
+chunk_size=300, chunk_overlap=50
+
+# 中等文档（如文章、报告）
+chunk_size=500, chunk_overlap=100
+
+# 长文档（如书籍、手册）
+chunk_size=1000, chunk_overlap=200
+
+# 技术文档（需要保留代码完整性）
+chunk_size=1500, chunk_overlap=300
+```
+
+### Q4: 如何提高 RAG 的检索质量？
+
+**A:** 几个优化策略：
+
+```python
+# 1. 使用更好的 Embeddings
+from langchain_openai import OpenAIEmbeddings
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+# 2. 调整检索参数
+config.top_k = 5  # 增加检索数量
+
+# 3. 使用重排序
+config.search_type = "mmr"  # 最大边际相关性
+
+# 4. 优化分块策略
+config.chunk_overlap = 150  # 增加重叠保持上下文
+```
+
+### Q5: RAG 系统和普通问答有什么区别？
+
+**A:**
+
+| 特性 | 普通问答 | RAG 系统 |
+|------|---------|----------|
+| 知识来源 | 模型训练数据 | 自定义文档 |
+| 信息时效性 | 截止到训练时间 | 实时更新 |
+| 回答准确性 | 可能产生幻觉 | 基于真实文档 |
+| 来源可追溯 | 无 | 有 |
+| 知识更新 | 需要重新训练 | 更新文档即可 |
 
 ## 📚 参考资源
 

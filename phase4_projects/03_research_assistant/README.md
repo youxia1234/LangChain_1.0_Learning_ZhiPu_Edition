@@ -121,11 +121,20 @@
 - 结果讨论
 - 参考文献
 
+## 🚀 环境要求
+
+```bash
+# 需要配置的环境变量
+ZHIPUAI_API_KEY=your_zhipuai_api_key_here
+```
+
+获取 API Key: https://open.bigmodel.cn/usercenter/apikeys
+
 ## 🚀 快速开始
 
 ```bash
 # 1. 设置环境变量
-export OPENAI_API_KEY="your-api-key"
+export ZHIPUAI_API_KEY="your-zhipuai-api-key"
 
 # 2. 运行研究助手
 python main.py
@@ -157,3 +166,88 @@ print(result["report"])
 - 支持多语言研究
 - 实现协作研究
 - 添加引用管理
+
+## ❓ 常见问题
+
+### Q1: Windows 上运行时 emoji 显示乱码怎么办？
+
+**A:** 这是 Windows 终端 GBK 编码问题。在代码开头添加：
+
+```python
+import sys
+import io
+
+# 设置 UTF-8 编码输出（解决 Windows emoji 显示问题）
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+```
+
+### Q2: 为什么使用智谱 AI 而不是 Groq？
+
+**A:**
+
+| 特性 | Groq | 智谱 AI |
+|-----|------|---------|
+| 费用 | 完全免费 | 有免费额度 |
+| 速度 | 极快 | 快 |
+| 中文支持 | 一般 | **优秀** |
+| 研究助手场景 | 良好 | **更适合中文研究报告生成** |
+| 国内网络 | 需代理 | **直接访问** |
+
+### Q3: 如何自定义研究主题？
+
+**A:** 有两种方式：
+
+```python
+# 方式 1: 修改 main.py 中的主题列表
+research_topics = [
+    "区块链在供应链管理中的应用",
+    "量子计算的商业化前景"
+]
+
+# 方式 2: 直接调用 run_research 函数
+result = run_research("你的研究主题")
+print(result["final_report"])
+```
+
+### Q4: 研究助手的工作流程是怎样的？
+
+**A:** 完整的6阶段流程：
+
+1. **研究规划**: 分析主题，生成研究大纲和关键问题
+2. **信息收集**: 搜索学术数据库和网络资源
+3. **信息分析**: 提取关键发现和观点
+4. **知识综合**: 生成各章节内容
+5. **报告生成**: 整合为完整报告，添加引用
+6. **质量检查**: 评估质量，决定是否迭代优化
+
+### Q5: 如何导出研究报告？
+
+**A:** 多种导出方式：
+
+```python
+# 运行研究
+result = run_research("人工智能在医疗领域的应用")
+
+# 导出为 Markdown
+with open("research_report.md", "w", encoding="utf-8") as f:
+    f.write(result["final_report"])
+
+# 导出为 PDF (需要 markdown 库)
+import markdown
+from weasyprint import HTML
+
+html_content = markdown.markdown(result["final_report"])
+HTML(string=html_content).write_pdf("research_report.pdf")
+
+# 导出结构化数据
+import json
+with open("research_data.json", "w", encoding="utf-8") as f:
+    json.dump({
+        "topic": result["research_topic"],
+        "findings": result["findings"],
+        "citations": result["citations"],
+        "report": result["final_report"]
+    }, f, ensure_ascii=False, indent=2)
+```

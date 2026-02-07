@@ -10,14 +10,21 @@
 """
 
 import os
+import sys
 from typing import List, Dict, Any, Optional, TypedDict, Literal, Annotated
 from dataclasses import dataclass
 from datetime import datetime
 import json
 from dotenv import load_dotenv
 
+# 设置 UTF-8 编码输出（解决 Windows emoji 显示问题）
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 # LangChain 核心导入
-from langchain.chat_models import init_chat_model
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -69,16 +76,20 @@ def safe_parse_json(text: str, default: dict = None) -> dict:
 
 # 加载环境变量
 load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+ZHIPUAI_API_KEY = os.getenv("ZHIPUAI_API_KEY")
 
-if not GROQ_API_KEY or GROQ_API_KEY == "your_groq_api_key_here":
+if not ZHIPUAI_API_KEY or ZHIPUAI_API_KEY == "your_zhipuai_api_key_here":
     raise ValueError(
-        "\n请先在 .env 文件中设置有效的 GROQ_API_KEY\n"
-        "访问 https://console.groq.com/keys 获取免费密钥"
+        "\n请先在 .env 文件中设置有效的 ZHIPUAI_API_KEY\n"
+        "访问 https://open.bigmodel.cn/usercenter/apikeys 获取 API 密钥"
     )
 
-# 初始化模型
-model = init_chat_model("groq:llama-3.3-70b-versatile", api_key=GROQ_API_KEY)
+# 初始化模型（使用智谱 AI）
+model = ChatOpenAI(
+    model="glm-4-flash",
+    api_key=ZHIPUAI_API_KEY,
+    base_url="https://open.bigmodel.cn/api/paas/v4/"
+)
 
 # ==================== 模拟数据库 ====================
 

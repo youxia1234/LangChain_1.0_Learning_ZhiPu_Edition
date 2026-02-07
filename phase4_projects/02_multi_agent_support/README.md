@@ -114,11 +114,20 @@
 - 满意度预测
 - 升级条件判断
 
+## 🚀 环境要求
+
+```bash
+# 需要配置的环境变量
+ZHIPUAI_API_KEY=your_zhipuai_api_key_here
+```
+
+获取 API Key: https://open.bigmodel.cn/usercenter/apikeys
+
 ## 🚀 快速开始
 
 ```bash
 # 1. 设置环境变量
-export OPENAI_API_KEY="your-api-key"
+export ZHIPUAI_API_KEY="your-zhipuai-api-key"
 
 # 2. 运行示例
 python main.py
@@ -139,3 +148,88 @@ python main.py
 - 实现代理间协作
 - 添加用户画像分析
 - 多语言支持
+
+## ❓ 常见问题
+
+### Q1: Windows 上运行时 emoji 显示乱码怎么办？
+
+**A:** 这是 Windows 终端 GBK 编码问题。在代码开头添加：
+
+```python
+import sys
+import io
+
+# 设置 UTF-8 编码输出（解决 Windows emoji 显示问题）
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+```
+
+### Q2: 为什么使用智谱 AI 而不是 Groq？
+
+**A:**
+
+| 特性 | Groq | 智谱 AI |
+|-----|------|---------|
+| 费用 | 完全免费 | 有免费额度 |
+| 速度 | 极快 | 快 |
+| 中文支持 | 一般 | **优秀** |
+| 多代理场景 | 良好 | **更适合中文客服对话** |
+| 国内网络 | 需代理 | **直接访问** |
+
+### Q3: 多代理系统和单代理系统有什么区别？
+
+**A:**
+
+| 特性 | 单代理系统 | 多代理系统 |
+|------|-----------|-----------|
+| 架构复杂度 | 简单 | 复杂 |
+| 专业性 | 通用型 | 领域专业化 |
+| 可维护性 | 代码集中 | 模块化、易维护 |
+| 扩展性 | 较难扩展 | 易于添加新代理 |
+| 协作能力 | 无 | 支持代理间协作 |
+| 适用场景 | 简单任务 | 复杂业务场景 |
+
+### Q4: 如何设计代理的 system_prompt？
+
+**A:** 好的 system_prompt 应包含：
+
+```python
+system_prompt = """你是[角色名称]。你的职责是：
+1. [具体职责1]
+2. [具体职责2]
+3. [具体职责3]
+
+工作方式：
+- 使用 [工具列表] 获取信息
+- 遵循 [业务规则]
+- 保持 [语气风格]
+
+注意事项：
+- [约束条件1]
+- [约束条件2]"""
+```
+
+### Q5: 如何调试多代理系统？
+
+**A:** 调试技巧：
+
+```python
+# 1. 打印中间状态
+def classify_intent(state: CustomerServiceState) -> CustomerServiceState:
+    print("🔍 分析用户意图...")
+    result = self.classifier.classify(state["user_message"])
+    print(f"   意图: {result['intent']}, 置信度: {result['confidence']}")
+    return state
+
+# 2. 使用 LangSmith 追踪
+os.environ["LANGCHAIN_TRACING"] = "true"
+
+# 3. 单独测试每个代理
+agent = TechSupportAgent()
+response = agent.handle("测试消息")
+print(response)
+
+# 4. 查看状态图
+print(system.graph.get_graph().print_ascii())
+```

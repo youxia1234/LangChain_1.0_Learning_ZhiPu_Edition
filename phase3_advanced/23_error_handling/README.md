@@ -4,6 +4,15 @@
 
 学习如何在 LangChain 应用中实现健壮的错误处理和恢复机制。
 
+## 🚀 环境要求
+
+```bash
+# 需要配置的环境变量
+ZHIPUAI_API_KEY=your_zhipuai_api_key_here
+```
+
+获取 API Key: https://open.bigmodel.cn/usercenter/apikeys
+
 ## 📚 核心概念
 
 ### 常见错误类型
@@ -40,9 +49,11 @@ model_with_retry = model.with_retry(
 ### 使用 with_fallbacks
 
 ```python
+from langchain_openai import ChatOpenAI
+
 # 配置回退模型
-primary_model = init_chat_model("openai:gpt-4o")
-fallback_model = init_chat_model("openai:gpt-4o-mini")
+primary_model = ChatOpenAI(model="glm-4-flash", ...)
+fallback_model = ChatOpenAI(model="glm-4-flash", ...)
 
 robust_model = primary_model.with_fallbacks([fallback_model])
 ```
@@ -74,3 +85,110 @@ safe_chain = RunnableLambda(safe_invoke)
 2. 记录错误日志便于排查
 3. 设置合理的重试次数和超时
 4. 向用户提供友好的错误信息
+
+---
+
+## ❓ 常见问题
+
+### Q1: Windows 上运行时 emoji 显示乱码怎么办？
+
+**A:** 这是 Windows 终端 GBK 编码问题。在代码开头添加：
+
+```python
+import sys
+import io
+
+# 设置 UTF-8 编码输出（解决 Windows emoji 显示问题）
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+```
+
+### Q2: 为什么使用智谱 AI 而不是 Groq？
+
+**A:**
+
+| 特性 | Groq | 智谱 AI |
+|-----|------|---------|
+| 费用 | 完全免费 | 有免费额度 |
+| 速度 | 极快 | 快 |
+| 中文支持 | 一般 | **优秀** |
+| 错误处理场景 | 良好 | **更适合中文错误消息** |
+| 国内网络 | 需代理 | **直接访问** |
+
+### Q3: 如何设置合适的重试次数和延迟？
+
+**A:** 根据场景选择：
+
+```python
+# 开发环境：快速反馈
+max_retries=2
+base_delay=0.5
+
+# 生产环境：更耐心
+max_retries=5
+base_delay=1.0
+
+# 对时间敏感的操作
+max_retries=3
+base_delay=2.0
+
+# 计算公式（指数退避）
+delay = min(base_delay * (2 ** attempt), max_delay)
+```
+
+### Q4: 如何处理 JSON 解析错误？
+
+**A:** 使用安全的 JSON 解析函数：
+
+```python
+import json
+import re
+
+def safe_parse_json(text: str, default: dict = None) -> dict:
+    """安全地解析JSON文本"""
+    if default is None:
+        default = {}
+    
+    content = text.strip()
+    
+    # 移除 Markdown 代码块
+    if "```json" in content:
+        content = content.split("```json")[1].split("```")[0]
+    elif "```" in content:
+        parts = content.split("```")
+        if len(parts) >= 2:
+            content = parts[1]
+    
+    content = content.strip()
+    
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return default
+```
+
+### Q5: 如何记录错误日志？
+
+**A:** 使用 Python 的 logging 模块：
+
+```python
+import logging
+from datetime import datetime
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    filename='app_errors.log'
+)
+
+logger = logging.getLogger(__name__)
+
+try:
+    result = model.invoke(prompt)
+except Exception as e:
+    logger.error(f"模型调用失败: {e}", exc_info=True)
+    logger.error(f"输入: {prompt}")
+    # 返回友好的错误消息
+```

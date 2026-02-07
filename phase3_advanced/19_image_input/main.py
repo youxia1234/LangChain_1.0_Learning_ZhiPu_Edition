@@ -3,12 +3,11 @@
 学习如何使用视觉模型处理图像
 
 ⚠️ 重要提示：
-1. 本模块需要支持视觉的模型（如 OpenAI 的 gpt-4o-mini）
-2. DeepSeek 目前不支持图像输入，请更换为 OpenAI 模型
-3. 请在 images/ 目录下放置你自己的测试图片
+1. 本模块需要支持视觉的模型（使用智谱 AI 的 glm-4v 模型）
+2. 请在 images/ 目录下放置你自己的测试图片
 
 使用前准备：
-1. 在 .env 中设置 OPENAI_API_KEY
+1. 在 .env 中设置 ZHIPUAI_API_KEY
 2. 在 images/ 目录下放置以下图片（或使用你自己的图片）:
    - sample.jpg: 任意测试图片
    - text_image.jpg: 包含文字的图片（用于OCR测试）
@@ -16,26 +15,38 @@
 """
 
 import os
+import sys
 import base64
 from pathlib import Path
 from dotenv import load_dotenv
+
+# 设置 UTF-8 编码输出（解决 Windows emoji 显示问题）
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage, SystemMessage
 
 # 加载环境变量
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ZHIPUAI_API_KEY = os.getenv("ZHIPUAI_API_KEY")
 
-if not OPENAI_API_KEY or OPENAI_API_KEY == "your_openai_api_key_here":
+if not ZHIPUAI_API_KEY or ZHIPUAI_API_KEY == "your_zhipuai_api_key_here":
     raise ValueError(
-        "\n请先在 .env 文件中设置有效的 OPENAI_API_KEY\n"
-        "图像处理需要使用 OpenAI 的视觉模型\n"
-        "访问 https://platform.openai.com/ 获取密钥"
+        "\n请先在 .env 文件中设置有效的 ZHIPUAI_API_KEY\n"
+        "图像处理需要使用智谱 AI 的视觉模型（glm-4v）\n"
+        "访问 https://open.bigmodel.cn/usercenter/apikeys 获取 API 密钥"
     )
 
-# 初始化模型（图像处理需要支持视觉的模型）
-model = init_chat_model("openai:gpt-4o-mini", api_key=OPENAI_API_KEY)
+# 初始化模型（使用智谱 AI 的视觉模型）
+from langchain_openai import ChatOpenAI
+model = ChatOpenAI(
+    model="glm-4v",  # 智谱 AI 的视觉模型
+    api_key=ZHIPUAI_API_KEY,
+    base_url="https://open.bigmodel.cn/api/paas/v4/"
+)
 
 # 图片目录
 IMAGES_DIR = Path(__file__).parent / "images"
@@ -302,10 +313,10 @@ if __name__ == "__main__":
     print("=" * 60)
     print("图像输入教程")
     print("=" * 60)
-    
+
     print("""
 ⚠️ 使用前请确保：
-1. 已在 .env 中设置 OPENAI_API_KEY
+1. 已在 .env 中设置 ZHIPUAI_API_KEY
 2. 已在 images/ 目录下放置测试图片:
    - sample.jpg: 任意测试图片
    - text_image.jpg: 包含文字的图片
@@ -337,5 +348,5 @@ if __name__ == "__main__":
 💡 提示：
 - 如需使用其他图片，请修改代码中的图片路径
 - 可以调用 example_5_custom_analysis() 分析任意图片
-- 确保使用支持视觉的模型（如 gpt-4o-mini）
+- 确保使用支持视觉的模型（如 glm-4v）
 """)
