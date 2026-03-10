@@ -1,20 +1,34 @@
 """
-RAG 检索增强生成系统 - 完整实现
+LangChain 知识库及 RAG 问答系统
 
-本模块实现了一个生产级别的 RAG 系统，包括：
-- 文档加载和处理
-- 向量存储和检索
-- 上下文感知的问答生成
-- 来源引用和置信度评估
+本模块实现了一个基于 LangChain 1.0 的知识库和 RAG 问答系统，
+专门用于帮助开发者学习和查询 LangChain/LangGraph 的使用方法。
+
+核心功能：
+- 自动解析项目中的所有学习模块（文档、代码、注释）
+- 构建结构化的向量知识库
+- 支持自然语言查询 LangChain 相关问题
+- 提供代码示例、最佳实践和来源引用
+
+💡 这是一个"用 LangChain 学习 LangChain"的元认知项目：
+- 使用 LangChain 1.0 的 create_agent API 构建 RAG 系统
+- 知识库内容就是 LangChain 本身的学习材料
+- 帮助开发者快速查找和学习 LangChain 用法
 
 ⚠️ Embeddings 说明：
-- 默认使用简单的 Fake Embeddings（用于演示）
+- 默认使用简单的 Hash Embeddings（用于演示）
 - 如需高质量结果，请设置 OPENAI_API_KEY 使用 OpenAI Embeddings
+
+📌 LangChain 1.0 正确用法：
+- 使用 create_agent 而不是链式调用
+- 检索功能作为 @tool 装饰的函数暴露给 agent
+- 参考 phase2_practical/13_rag_basics 和 14_rag_advanced
 """
 
 import os
 import sys
-from typing import List, Dict, Any, Optional, TypedDict, Literal
+from pathlib import Path
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
@@ -25,13 +39,10 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # LangChain 核心导入
-from langchain.chat_models import init_chat_model
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from langchain.agents import create_agent
+from langchain_core.tools import tool
 from langchain_core.documents import Document
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
-from langchain_core.embeddings import Embeddings
 
 # 文本处理
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -39,8 +50,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # 向量存储
 from langchain_core.vectorstores import InMemoryVectorStore
 
-# LangGraph
-from langgraph.graph import StateGraph, START, END
+# 导入知识库构建模块
+from knowledge_base import build_knowledge_base_from_project
 
 # 加载环境变量
 load_dotenv()
@@ -54,7 +65,6 @@ if not ZHIPUAI_API_KEY or ZHIPUAI_API_KEY == "your_zhipuai_api_key_here":
     )
 
 # 初始化模型（使用智谱 AI）
-from langchain_openai import ChatOpenAI
 model = ChatOpenAI(
     model="glm-4-flash",
     api_key=ZHIPUAI_API_KEY,
@@ -64,32 +74,32 @@ model = ChatOpenAI(
 
 # ==================== 简单 Embeddings（用于演示）====================
 
-class SimpleEmbeddings(Embeddings):
+class SimpleEmbeddings:
     """
     简单的 Embeddings 实现（用于演示）
-    
-    使用简单的词频统计生成向量，适合演示目的。
+
+    使用简单的 hash 生成向量，适合演示目的。
     生产环境请使用 OpenAI 或 HuggingFace Embeddings。
     """
-    
+
     def __init__(self, dimension: int = 384):
         self.dimension = dimension
-    
+
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """嵌入文档列表"""
         return [self._embed_text(text) for text in texts]
-    
+
     def embed_query(self, text: str) -> List[float]:
         """嵌入查询"""
         return self._embed_text(text)
-    
+
     def _embed_text(self, text: str) -> List[float]:
         """简单的文本嵌入（基于字符频率）"""
         import hashlib
         # 使用文本的hash生成伪随机但确定的向量
         hash_obj = hashlib.md5(text.encode())
         hash_bytes = hash_obj.digest()
-        
+
         # 扩展到目标维度
         vector = []
         for i in range(self.dimension):
@@ -97,7 +107,7 @@ class SimpleEmbeddings(Embeddings):
             # 归一化到 [-1, 1]
             value = (hash_bytes[byte_idx] / 255.0) * 2 - 1
             vector.append(value)
-        
+
         return vector
 
 
@@ -111,7 +121,7 @@ def get_embeddings():
             return OpenAIEmbeddings(model="text-embedding-3-small")
         except ImportError:
             print("⚠️ langchain_openai 未安装，使用简单 Embeddings")
-    
+
     print("📊 使用简单 Embeddings（演示用）")
     return SimpleEmbeddings()
 
@@ -120,38 +130,26 @@ def get_embeddings():
 
 @dataclass
 class RAGConfig:
-    """RAG 系统配置"""
-    # 模型配置（使用全局 model）
+    """RAG 系统配置 - 针对 LangChain 学习场景优化"""
+    # 模型配置
     temperature: float = 0.1
-    
-    # 分块配置
-    chunk_size: int = 500
-    chunk_overlap: int = 100
-    
+
+    # 分块配置 - 针对代码和技术文档优化
+    chunk_size: int = 800  # 增大以保留更多代码上下文
+    chunk_overlap: int = 150  # 增加重叠以保持代码完整性
+
     # 检索配置
-    top_k: int = 3
-    search_type: str = "similarity"  # similarity, mmr
-    
-    # 生成配置
-    max_tokens: int = 1000
+    top_k: int = 5  # 检索数量
 
-# ==================== 状态定义 ====================
+    # 知识库配置
+    project_root: str = "."  # 项目根目录
 
-class RAGState(TypedDict):
-    """RAG 流程状态"""
-    query: str                          # 用户查询
-    chat_history: List[Dict[str, str]]  # 对话历史
-    documents: List[Document]           # 检索到的文档
-    context: str                        # 格式化的上下文
-    answer: str                         # 生成的回答
-    sources: List[Dict[str, Any]]       # 来源信息
-    confidence: float                   # 置信度评分
 
-# ==================== 文档处理模块 ====================
+# ==================== 知识库管理器 ====================
 
-class DocumentProcessor:
-    """文档处理器：加载、分块、向量化"""
-    
+class KnowledgeBaseManager:
+    """知识库管理器：构建和管理向量知识库"""
+
     def __init__(self, config: RAGConfig):
         self.config = config
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -159,473 +157,346 @@ class DocumentProcessor:
             chunk_overlap=config.chunk_overlap,
             separators=["\n\n", "\n", "。", "！", "？", ".", "!", "?", " ", ""]
         )
-        self.embeddings = get_embeddings()  # 使用智能选择的 Embeddings
+        self.embeddings = get_embeddings()
         self.vector_store = None
-    
-    def load_documents(self, texts: List[str], metadatas: Optional[List[Dict]] = None) -> List[Document]:
-        """从文本创建文档"""
-        documents = []
-        for i, text in enumerate(texts):
-            metadata = metadatas[i] if metadatas and i < len(metadatas) else {"source": f"doc_{i}"}
-            documents.append(Document(page_content=text, metadata=metadata))
-        return documents
-    
-    def split_documents(self, documents: List[Document]) -> List[Document]:
-        """分割文档为小块"""
-        return self.text_splitter.split_documents(documents)
-    
-    def create_vector_store(self, documents: List[Document]) -> InMemoryVectorStore:
-        """创建向量存储"""
+        self.documents = []
+
+    def build_from_project(self, project_root: str) -> List[Document]:
+        """从项目构建知识库"""
+        print("\n" + "=" * 60)
+        print("📚 构建知识库")
+        print("=" * 60)
+
+        # 使用 knowledge_base 模块解析项目
+        self.documents = build_knowledge_base_from_project(project_root)
+
+        print(f"\n📊 共提取 {len(self.documents)} 个文档片段")
+
+        # 分割文档
+        print("\n✂️ 分割文档...")
+        chunks = self.text_splitter.split_documents(self.documents)
+        print(f"   生成了 {len(chunks)} 个文本块")
+
+        # 创建向量存储
+        print("\n🔢 创建向量存储...")
         self.vector_store = InMemoryVectorStore.from_documents(
-            documents=documents,
+            documents=chunks,
             embedding=self.embeddings
         )
-        return self.vector_store
-    
-    def process(self, texts: List[str], metadatas: Optional[List[Dict]] = None) -> InMemoryVectorStore:
-        """完整处理流程：加载 -> 分块 -> 向量化"""
-        print("📄 加载文档...")
-        documents = self.load_documents(texts, metadatas)
-        print(f"   加载了 {len(documents)} 个文档")
-        
-        print("✂️  分割文档...")
-        chunks = self.split_documents(documents)
-        print(f"   生成了 {len(chunks)} 个文本块")
-        
-        print("🔢 创建向量存储...")
-        vector_store = self.create_vector_store(chunks)
         print("   向量存储创建完成")
-        
-        return vector_store
 
-# ==================== 检索模块 ====================
+        return self.documents
 
-class Retriever:
-    """检索器：从向量存储中检索相关文档"""
-    
-    def __init__(self, vector_store: InMemoryVectorStore, config: RAGConfig):
-        self.vector_store = vector_store
+    def search(self, query: str, k: int = None) -> List[Document]:
+        """搜索知识库"""
+        if not self.vector_store:
+            raise ValueError("知识库未构建，请先调用 build_from_project()")
+
+        k = k or self.config.top_k
+        return self.vector_store.similarity_search(query, k=k)
+
+    def search_with_scores(self, query: str, k: int = None) -> List[tuple]:
+        """搜索知识库并返回相似度分数"""
+        if not self.vector_store:
+            raise ValueError("知识库未构建，请先调用 build_from_project()")
+
+        k = k or self.config.top_k
+        return self.vector_store.similarity_search_with_score(query, k=k)
+
+
+# ==================== RAG Agent（使用 LangChain 1.0 API）====================
+
+class RAGAgent:
+    """
+    RAG 问答 Agent
+
+    使用 LangChain 1.0 的 create_agent API 构建，
+    检索功能作为 tool 暴露给 agent。
+    """
+
+    def __init__(self, kb_manager: KnowledgeBaseManager, config: RAGConfig):
+        self.kb_manager = kb_manager
         self.config = config
-    
-    def retrieve(self, query: str) -> List[Document]:
-        """检索相关文档"""
-        return self.vector_store.similarity_search(
-            query=query,
-            k=self.config.top_k
-        )
-    
-    def retrieve_with_scores(self, query: str) -> List[tuple]:
-        """检索文档并返回相似度分数"""
-        return self.vector_store.similarity_search_with_score(
-            query=query,
-            k=self.config.top_k
-        )
+        self.agent = None
+        self._create_agent()
 
-# ==================== 生成模块 ====================
+    def _create_agent(self):
+        """创建 RAG Agent"""
+        # 创建检索工具
+        @tool
+        def search_knowledge_base(query: str) -> str:
+            """在 LangChain 知识库中搜索相关信息
 
-class Generator:
-    """生成器：基于上下文生成回答"""
-    
-    def __init__(self, config: RAGConfig):
-        self.config = config
-        # 使用全局 model（已配置为 Groq）
-        self.llm = model
-        
-        # RAG 提示模板
-        self.rag_prompt = ChatPromptTemplate.from_messages([
-            ("system", """你是一个专业的问答助手。请基于提供的上下文信息回答用户的问题。
+            Args:
+                query: 搜索查询，可以是关于 LangChain/LangGraph 的任何问题
+
+            Returns:
+                检索到的相关文档内容
+            """
+            docs = self.kb_manager.search(query, k=self.config.top_k)
+
+            # 格式化检索结果
+            result_parts = []
+            for i, doc in enumerate(docs, 1):
+                metadata = doc.metadata
+                module = metadata.get("module", "unknown")
+                source = metadata.get("source", "unknown")
+                doc_type = metadata.get("type", "unknown")
+
+                result_parts.append(
+                    f"[来源 {i}]\n"
+                    f"模块: {module}\n"
+                    f"文件: {source}\n"
+                    f"类型: {doc_type}\n"
+                    f"内容: {doc.page_content}"
+                )
+
+            return "\n\n".join(result_parts)
+
+        @tool
+        def get_module_overview(module_name: str) -> str:
+            """获取特定模块的概览信息
+
+            Args:
+                module_name: 模块名称，如 "01_hello_langchain"
+
+            Returns:
+                该模块的概览信息
+            """
+            # 搜索特定模块的文档
+            query = f"{module_name} 模块 概述 介绍"
+            docs = self.kb_manager.search(query, k=10)
+
+            # 筛选属于该模块的文档
+            module_docs = [
+                doc for doc in docs
+                if doc.metadata.get("module") == module_name
+            ]
+
+            if not module_docs:
+                return f"未找到模块 '{module_name}' 的信息"
+
+            # 提取 markdown 类型的文档（通常是概述）
+            overview_docs = [
+                doc for doc in module_docs
+                if doc.metadata.get("type") == "markdown"
+            ]
+
+            if overview_docs:
+                return overview_docs[0].page_content[:1000]
+
+            return module_docs[0].page_content[:1000]
+
+        # 使用 LangChain 1.0 的 create_agent API
+        self.agent = create_agent(
+            model=model,
+            tools=[search_knowledge_base, get_module_overview],
+            system_prompt="""你是一个专业的 LangChain 和 LangGraph 学习助手。
+
+重要：你必须始终使用 search_knowledge_base 工具来搜索知识库，即使你认为自己知道答案。
+
+你的职责：
+1. 基于知识库中的信息，准确回答关于 LangChain/LangGraph 的问题
+2. 提供清晰的代码示例和最佳实践
+3. 解释核心概念和 API 用法
+4. 指出常见的使用陷阱和注意事项
+
+工作流程：
+1. 当用户提问时，首先使用 search_knowledge_base 工具搜索相关信息（必须执行）
+2. 如果用户询问特定模块，使用 get_module_overview 获取模块概览
+3. 基于检索到的信息组织回答
+
+回答格式要求：
+- 使用 Markdown 格式（代码块用 ``` 包裹）
+- 重要概念用粗体标记
+- 代码示例要完整可运行
+- 在回答末尾标注信息来源（模块名和文件名）
 
 重要规则：
-1. 只使用提供的上下文信息来回答问题
-2. 如果上下文中没有相关信息，请诚实地说"根据提供的信息，我无法回答这个问题"
-3. 回答要准确、简洁、有条理
-4. 在回答末尾标注信息来源
+1. 必须使用 search_knowledge_base 工具搜索相关信息
+2. 只使用知识库中的信息来回答问题
+3. 如果知识库中没有相关信息，请诚实地说"根据知识库中的信息，我没有找到相关内容"
+4. 对于代码示例，确保包含必要的导入语句
+"""
+        )
 
-上下文信息：
-{context}
-"""),
-            MessagesPlaceholder(variable_name="chat_history", optional=True),
-            ("human", "{query}")
-        ])
-        
-        # 查询改写提示
-        self.rewrite_prompt = ChatPromptTemplate.from_messages([
-            ("system", """你是一个查询优化专家。请根据对话历史，将用户的问题改写为一个独立、完整的查询。
-            
-如果问题本身已经很清晰完整，直接返回原问题。
-只返回改写后的查询，不要添加任何解释。"""),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "原始问题：{query}\n\n请改写为独立完整的查询：")
-        ])
-    
-    def rewrite_query(self, query: str, chat_history: List[Dict[str, str]]) -> str:
-        """根据对话历史改写查询"""
-        if not chat_history:
-            return query
-        
-        # 转换对话历史格式
-        messages = []
-        for msg in chat_history[-4:]:  # 只用最近4轮对话
-            if msg["role"] == "user":
-                messages.append(HumanMessage(content=msg["content"]))
-            else:
-                messages.append(AIMessage(content=msg["content"]))
-        
-        chain = self.rewrite_prompt | self.llm | StrOutputParser()
-        return chain.invoke({"query": query, "chat_history": messages})
-    
-    def generate(self, query: str, context: str, chat_history: List[Dict[str, str]] = None) -> str:
-        """生成回答"""
-        messages = []
-        if chat_history:
-            for msg in chat_history[-4:]:
-                if msg["role"] == "user":
-                    messages.append(HumanMessage(content=msg["content"]))
-                else:
-                    messages.append(AIMessage(content=msg["content"]))
-        
-        chain = self.rag_prompt | self.llm | StrOutputParser()
-        return chain.invoke({
-            "query": query,
-            "context": context,
-            "chat_history": messages
-        })
-    
-    def evaluate_confidence(self, query: str, context: str, answer: str) -> float:
-        """评估回答的置信度"""
-        eval_prompt = ChatPromptTemplate.from_messages([
-            ("system", """评估以下回答的置信度。考虑：
-1. 回答是否基于提供的上下文
-2. 信息的相关性和准确性
-3. 回答的完整性
-
-只返回一个0到1之间的数字，表示置信度。"""),
-            ("human", """上下文：{context}
-
-问题：{query}
-
-回答：{answer}
-
-置信度（0-1）：""")
-        ])
-        
-        chain = eval_prompt | self.llm | StrOutputParser()
-        try:
-            score = float(chain.invoke({
-                "context": context,
-                "query": query,
-                "answer": answer
-            }).strip())
-            return min(max(score, 0.0), 1.0)
-        except:
-            return 0.5
-
-# ==================== RAG 链整合 ====================
-
-class RAGChain:
-    """RAG 链：整合所有组件的完整流程"""
-    
-    def __init__(self, config: RAGConfig = None):
-        self.config = config or RAGConfig()
-        self.processor = DocumentProcessor(self.config)
-        self.retriever = None
-        self.generator = Generator(self.config)
-        self.graph = None
-    
-    def index_documents(self, texts: List[str], metadatas: Optional[List[Dict]] = None):
-        """索引文档"""
-        vector_store = self.processor.process(texts, metadatas)
-        self.retriever = Retriever(vector_store, self.config)
-        self._build_graph()
-    
-    def _build_graph(self):
-        """构建 LangGraph 流程"""
-        
-        def process_query(state: RAGState) -> RAGState:
-            """处理查询：改写查询（如有对话历史）"""
-            query = state["query"]
-            chat_history = state.get("chat_history", [])
-            
-            if chat_history:
-                rewritten = self.generator.rewrite_query(query, chat_history)
-                print(f"🔄 查询改写：{query} -> {rewritten}")
-                state["query"] = rewritten
-            
-            return state
-        
-        def retrieve_documents(state: RAGState) -> RAGState:
-            """检索相关文档"""
-            query = state["query"]
-            
-            docs = self.retriever.retrieve(query)
-            print(f"📚 检索到 {len(docs)} 个相关文档")
-            
-            state["documents"] = docs
-            
-            # 格式化上下文
-            context_parts = []
-            sources = []
-            for i, doc in enumerate(docs):
-                context_parts.append(f"[文档 {i+1}] {doc.page_content}")
-                sources.append({
-                    "index": i + 1,
-                    "source": doc.metadata.get("source", "unknown"),
-                    "content_preview": doc.page_content[:100] + "..."
-                })
-            
-            state["context"] = "\n\n".join(context_parts)
-            state["sources"] = sources
-            
-            return state
-        
-        def generate_answer(state: RAGState) -> RAGState:
-            """生成回答"""
-            answer = self.generator.generate(
-                query=state["query"],
-                context=state["context"],
-                chat_history=state.get("chat_history", [])
-            )
-            state["answer"] = answer
-            print("💬 生成回答完成")
-            return state
-        
-        def evaluate_response(state: RAGState) -> RAGState:
-            """评估回答置信度"""
-            confidence = self.generator.evaluate_confidence(
-                query=state["query"],
-                context=state["context"],
-                answer=state["answer"]
-            )
-            state["confidence"] = confidence
-            print(f"📊 置信度评估：{confidence:.2f}")
-            return state
-        
-        # 构建图
-        graph = StateGraph(RAGState)
-        
-        # 添加节点
-        graph.add_node("process_query", process_query)
-        graph.add_node("retrieve", retrieve_documents)
-        graph.add_node("generate", generate_answer)
-        graph.add_node("evaluate", evaluate_response)
-        
-        # 添加边
-        graph.add_edge(START, "process_query")
-        graph.add_edge("process_query", "retrieve")
-        graph.add_edge("retrieve", "generate")
-        graph.add_edge("generate", "evaluate")
-        graph.add_edge("evaluate", END)
-        
-        self.graph = graph.compile()
-    
-    def query(self, question: str, chat_history: List[Dict[str, str]] = None) -> Dict[str, Any]:
+    def query(self, question: str) -> Dict[str, Any]:
         """执行查询"""
-        if not self.retriever:
-            raise ValueError("请先调用 index_documents() 索引文档")
-        
+        if not self.agent:
+            raise ValueError("Agent 未初始化")
+
         print(f"\n{'='*60}")
         print(f"🔍 问题：{question}")
         print('='*60)
-        
-        initial_state = {
-            "query": question,
-            "chat_history": chat_history or [],
-            "documents": [],
-            "context": "",
-            "answer": "",
-            "sources": [],
-            "confidence": 0.0
-        }
-        
-        result = self.graph.invoke(initial_state)
-        
+
+        # 调用 agent
+        response = self.agent.invoke({
+            "messages": [{"role": "user", "content": question}]
+        })
+
+        # 获取回答
+        answer = response["messages"][-1].content
+        print("💬 生成回答完成")
+
+        # 尝试获取来源信息（从工具调用中）
+        sources = []
+        for msg in response["messages"]:
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                for call in msg.tool_calls:
+                    if "name" in call and call["name"] == "search_knowledge_base":
+                        # 从工具输出中提取来源
+                        sources.append({
+                            "tool": "search_knowledge_base",
+                            "query": call["args"].get("query", "")
+                        })
+
         return {
-            "answer": result["answer"],
-            "sources": result["sources"],
-            "confidence": result["confidence"]
+            "answer": answer,
+            "sources": sources,
+            "all_messages": response["messages"]
         }
 
-# ==================== 示例数据 ====================
-
-SAMPLE_DOCUMENTS = [
-    {
-        "text": """LangChain 简介
-
-LangChain 是一个用于开发大型语言模型（LLM）应用的开源框架。它提供了一套标准化的接口和工具，
-帮助开发者快速构建基于 LLM 的应用程序。
-
-主要特点：
-1. 模块化设计：所有组件都可以独立使用或组合使用
-2. 链式调用：支持将多个组件链接在一起形成复杂的工作流
-3. 记忆管理：内置多种记忆类型，支持对话历史管理
-4. 工具集成：可以轻松集成外部工具和 API
-
-LangChain 1.0 于 2025 年 10 月发布，带来了重大改进：
-- 更清晰的 API 设计
-- 更好的类型提示支持
-- 改进的错误处理
-- 与 LangGraph 的深度集成
-
-使用场景包括：聊天机器人、问答系统、文档分析、代码生成等。""",
-        "metadata": {"source": "langchain_intro.txt", "topic": "introduction"}
-    },
-    {
-        "text": """LangGraph 介绍
-
-LangGraph 是 LangChain 生态系统中的一个重要组件，专门用于构建有状态的、多步骤的 AI 应用。
-它基于图结构来定义工作流，使得复杂的 AI 流程变得清晰和可控。
-
-核心概念：
-1. 状态（State）：使用 TypedDict 定义应用状态，在节点间传递
-2. 节点（Node）：处理状态的函数，执行具体的业务逻辑
-3. 边（Edge）：定义节点之间的连接和流转规则
-4. 条件边：根据状态动态决定下一个节点
-
-LangGraph 的优势：
-- 可视化流程：图结构使工作流一目了然
-- 状态管理：自动处理状态的传递和更新
-- 检查点：支持中间状态的保存和恢复
-- 人机协作：支持 human-in-the-loop 模式
-
-典型应用场景：
-- 多步骤推理
-- 多代理协作
-- 复杂决策流程
-- 带有循环的工作流""",
-        "metadata": {"source": "langgraph_intro.txt", "topic": "langgraph"}
-    },
-    {
-        "text": """RAG（检索增强生成）原理
-
-RAG 是一种结合检索和生成的技术，通过从知识库中检索相关信息来增强 LLM 的回答质量。
-
-工作流程：
-1. 文档处理：将文档分割成小块，并转换为向量表示
-2. 向量存储：将文档向量存入向量数据库
-3. 查询检索：用户提问时，检索最相关的文档块
-4. 上下文增强：将检索到的内容作为上下文提供给 LLM
-5. 回答生成：LLM 基于上下文生成准确的回答
-
-RAG 的优势：
-- 减少幻觉：基于真实文档生成回答
-- 知识更新：无需重新训练模型即可更新知识
-- 来源可追溯：可以引用具体的信息来源
-- 成本效益：比微调模型更经济
-
-最佳实践：
-- 选择合适的分块策略
-- 优化检索算法
-- 设计有效的提示模板
-- 实现结果重排序""",
-        "metadata": {"source": "rag_principles.txt", "topic": "rag"}
-    },
-    {
-        "text": """向量数据库介绍
-
-向量数据库是专门用于存储和检索向量数据的数据库系统，是 RAG 系统的核心组件之一。
-
-主要特点：
-1. 高效相似度搜索：支持快速的近似最近邻（ANN）搜索
-2. 可扩展性：能够处理数百万甚至数十亿级别的向量
-3. 实时更新：支持动态添加和删除向量
-4. 元数据过滤：支持基于元数据的过滤查询
-
-常见的向量数据库：
-- Chroma：轻量级，适合开发和原型
-- Pinecone：云原生，完全托管
-- Milvus：开源，高性能
-- Weaviate：支持混合搜索
-- FAISS：Facebook 开发，适合研究
-
-选择建议：
-- 开发阶段：使用 Chroma 或内存向量存储
-- 生产环境：根据规模选择 Pinecone 或 Milvus
-- 需要混合搜索：考虑 Weaviate
-
-性能优化：
-- 选择合适的索引类型
-- 调整搜索参数
-- 使用批量操作""",
-        "metadata": {"source": "vector_db.txt", "topic": "database"}
-    }
-]
 
 # ==================== 主程序 ====================
 
-def main():
-    """主程序：演示 RAG 系统的使用"""
-    
-    print("=" * 60)
-    print("🚀 RAG 检索增强生成系统演示")
-    print("=" * 60)
-    
-    # 1. 初始化 RAG 系统
-    print("\n📦 初始化 RAG 系统...")
-    config = RAGConfig(
-        chunk_size=300,
-        chunk_overlap=50,
-        top_k=3
-    )
-    rag = RAGChain(config)
-    
-    # 2. 索引文档
-    print("\n📄 索引示例文档...")
-    texts = [doc["text"] for doc in SAMPLE_DOCUMENTS]
-    metadatas = [doc["metadata"] for doc in SAMPLE_DOCUMENTS]
-    rag.index_documents(texts, metadatas)
-    
-    # 3. 单轮问答演示
+def build_knowledge_base(config: RAGConfig, kb_manager: KnowledgeBaseManager):
+    """构建知识库"""
+    # 获取项目根目录
+    project_root = Path(__file__).parent.parent.parent
+    print(f"\n📂 项目根目录: {project_root}")
+
+    # 构建知识库
+    return kb_manager.build_from_project(str(project_root))
+
+
+def interactive_mode(agent: RAGAgent):
+    """交互式问答模式"""
     print("\n" + "=" * 60)
-    print("📝 示例 1：单轮问答")
+    print("💬 进入交互式问答模式")
     print("=" * 60)
-    
-    questions = [
-        "什么是 LangChain？它有什么特点？",
-        "RAG 系统的工作流程是怎样的？",
-        "有哪些常见的向量数据库？"
+    print("\n提示：")
+    print("  - 输入你的问题，系统将基于知识库回答")
+    print("  - 输入 'quit' 或 'exit' 退出")
+    print("  - 输入 'clear' 清空对话历史")
+    print("  - 输入 'module:模块名' 查看特定模块概览")
+    print("")
+
+    while True:
+        try:
+            question = input("\n👤 你的问题: ").strip()
+
+            if not question:
+                continue
+
+            if question.lower() in ['quit', 'exit', 'q']:
+                print("\n👋 再见！")
+                break
+
+            if question.lower() == 'clear':
+                # 重新创建 agent 以清空历史
+                agent._create_agent()
+                print("✅ 对话历史已清空")
+                continue
+
+            # 查询
+            result = agent.query(question)
+
+            # 显示回答
+            print("\n🤖 回答:")
+            print("-" * 60)
+            print(result['answer'])
+            print("-" * 60)
+
+        except KeyboardInterrupt:
+            print("\n\n👋 再见！")
+            break
+        except Exception as e:
+            print(f"\n❌ 发生错误: {e}")
+
+
+def demo_mode(agent: RAGAgent):
+    """演示模式 - 预设示例问题"""
+    print("\n" + "=" * 60)
+    print("📝 演示模式 - 示例问题")
+    print("=" * 60)
+
+    demo_questions = [
+        "什么是 LangChain？它有哪些核心组件？",
+        "LangGraph 中的 State 是如何定义的？",
+        "如何创建一个简单的 Agent？",
+        "RAG 系统的工作流程是什么？",
+        "如何使用 MemorySaver 保存对话历史？"
     ]
-    
-    for q in questions:
-        result = rag.query(q)
-        print(f"\n📌 回答：\n{result['answer']}")
-        print("\n📎 来源：")
-        for src in result['sources']:
-            print(f"   - [{src['index']}] {src['source']}")
-        print(f"\n📊 置信度：{result['confidence']:.2f}")
-        print("-" * 60)
-    
-    # 4. 多轮对话演示
-    print("\n" + "=" * 60)
-    print("📝 示例 2：多轮对话（带上下文）")
+
+    for i, q in enumerate(demo_questions, 1):
+        print(f"\n{'=' * 60}")
+        print(f"📝 示例 {i}/{len(demo_questions)}")
+        print(f"👤 问题: {q}")
+        print('=' * 60)
+
+        result = agent.query(q)
+
+        print(f"\n🤖 回答:")
+        print(result['answer'][:1000] if len(result['answer']) > 1000 else result['answer'])
+
+        if len(result['answer']) > 1000:
+            print("\n... (回答已截断)")
+
+        print(f"\n📊 工具调用: {len(result['sources'])} 次")
+
+
+def main():
+    """主程序"""
     print("=" * 60)
-    
-    chat_history = []
-    
-    # 第一轮
-    q1 = "LangGraph 是什么？"
-    print(f"\n👤 用户：{q1}")
-    result1 = rag.query(q1, chat_history)
-    print(f"\n🤖 助手：{result1['answer']}")
-    chat_history.append({"role": "user", "content": q1})
-    chat_history.append({"role": "assistant", "content": result1['answer']})
-    
-    # 第二轮（指代消解）
-    q2 = "它的核心概念有哪些？"
-    print(f"\n👤 用户：{q2}")
-    result2 = rag.query(q2, chat_history)
-    print(f"\n🤖 助手：{result2['answer']}")
-    chat_history.append({"role": "user", "content": q2})
-    chat_history.append({"role": "assistant", "content": result2['answer']})
-    
-    # 第三轮
-    q3 = "在什么场景下使用它比较合适？"
-    print(f"\n👤 用户：{q3}")
-    result3 = rag.query(q3, chat_history)
-    print(f"\n🤖 助手：{result3['answer']}")
-    
-    print("\n" + "=" * 60)
-    print("✅ RAG 系统演示完成！")
+    print("🚀 LangChain 知识库及 RAG 问答系统")
     print("=" * 60)
+    print("\n💡 这是一个 '用 LangChain 学习 LangChain' 的系统")
+    print("   知识库来源于完整的 LangChain 1.0 学习项目")
+    print("\n📌 使用 LangChain 1.0 的 create_agent API 构建")
+
+    # 1. 初始化配置
+    config = RAGConfig(
+        chunk_size=800,
+        chunk_overlap=150,
+        top_k=5,
+        project_root=str(Path(__file__).parent.parent.parent)
+    )
+
+    # 2. 初始化知识库管理器
+    print("\n📦 初始化知识库管理器...")
+    kb_manager = KnowledgeBaseManager(config)
+
+    # 3. 构建知识库
+    build_knowledge_base(config, kb_manager)
+
+    # 4. 创建 RAG Agent
+    print("\n🤖 创建 RAG Agent...")
+    agent = RAGAgent(kb_manager, config)
+    print("✅ RAG Agent 创建完成")
+
+    # 5. 选择模式
+    print("\n" + "=" * 60)
+    print("请选择运行模式:")
+    print("  1. 演示模式 - 运行预设示例问题")
+    print("  2. 交互模式 - 自由提问")
+    print("=" * 60)
+
+    choice = input("\n请输入选择 (1/2，默认 1): ").strip()
+
+    if choice == '2':
+        interactive_mode(agent)
+    else:
+        demo_mode(agent)
+        # 演示结束后提供交互选项
+        print("\n" + "=" * 60)
+        enter_interactive = input("是否进入交互模式继续提问？(y/n): ").strip().lower()
+        if enter_interactive == 'y':
+            interactive_mode(agent)
+
+    print("\n" + "=" * 60)
+    print("✅ 系统运行结束！")
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     main()
