@@ -172,3 +172,4 @@ phase2_practical/14_rag_advanced/data/*.txt
 !.env.example
 !requirements.txt
 !README.md
+nul

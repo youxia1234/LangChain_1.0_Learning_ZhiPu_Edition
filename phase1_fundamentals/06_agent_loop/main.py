@@ -62,14 +62,14 @@ def example_1_understand_loop():
     print("示例 1：Agent 执行循环详解")
     print("="*70)
 
-    agent = create_agent(
+    agent1 = create_agent(
         model=model,
         tools=[calculator],
     system_prompt="你是一个有帮助的助手。"
     )
 
     print("\n问题：25 乘以 8 等于多少？")
-    response = agent.invoke({
+    response = agent1.invoke({
         "messages": [{"role": "user", "content": "25 乘以 8 等于多少？"}]
     })
 

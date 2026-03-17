@@ -1,0 +1,50 @@
+# ==================== Web Framework ====================
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+streamlit==1.28.1
+streamlit-extras==0.3.5
+requests==2.31.0
+python-multipart==0.0.6
+
+# ==================== LangChain & LangGraph ====================
+langchain==0.1.0
+langchain-openai==0.0.2
+langchain-community==0.0.10
+langchain-core==0.1.10
+langchain-huggingface==0.0.1
+langchain-text-splitters==0.0.1
+langgraph==0.0.20
+langgraph-checkpoint-sqlite==1.0.0
+
+# ==================== Vector Database ====================
+chromadb==0.4.22
+langchain-chroma==0.1.1
+
+# ==================== Hybrid Search (BM25) ====================
+rank-bm25==0.2.2
+langchain-classic==0.0.7
+
+# ==================== Document Processing ====================
+pypdf==3.17.4
+pdfplumber==0.10.3
+python-docx==1.1.0
+openpyxl==3.1.2
+PyYAML==6.0.1
+chardet==5.2.0
+
+# ==================== Embeddings ====================
+sentence-transformers==2.2.2
+transformers==4.35.2
+torch==2.1.1
+
+# ==================== Data & Validation ====================
+pydantic==2.5.0
+pydantic-settings==2.1.0
+numpy==1.24.3
+
+# ==================== Environment ====================
+python-dotenv==1.0.0
+
+# ==================== Utilities ====================
+aiofiles==23.2.1
+httpx==0.25.1
