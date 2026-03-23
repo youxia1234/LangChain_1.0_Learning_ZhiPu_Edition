@@ -15,7 +15,7 @@
 
 - **多代理架构**：意图识别、技术支持、订单服务、产品咨询、质量检查、人工升级
 - **混合检索**：BM25 关键词检索 + 向量语义检索，使用 RRF 算法融合结果
-- **RAG 集成**：基于 ChromaDB 的本地向量数据库，支持文档上传和知识库扩展
+- **RAG 集成**：基于 Milvus 的分布式向量数据库，支持文档上传和知识库扩展
 - **智能路由**：自动识别用户意图并路由到合适的代理
 - **质量保证**：内置质量检查机制，低质量回复自动升级人工
 - **Web 界面**：Streamlit 构建的现代化前端界面
@@ -28,9 +28,9 @@
 | 后端框架 | FastAPI | 高性能 Python Web 框架 |
 | 前端框架 | Streamlit | 快速构建 AI 应用的 Python 框架 |
 | LLM | Zhipu AI (glm-4-flash) | 中文语言优化 |
-| Embeddings | Zhipu AI (embedding-2) | 国内无限制，1024 维 |
-| 向量数据库 | ChromaDB | 本地向量数据库，纯 Python |
-| 混合检索 | BM25 + ChromaDB | 关键词精确匹配 + 语义理解 |
+| Embeddings | Zhipu AI (embedding-2) | 国内无限制，768 维 |
+| 向量数据库 | Milvus | 分布式向量数据库，高性能 |
+| 混合检索 | BM25 + Milvus | 关键词精确匹配 + 语义理解 |
 | 文档处理 | LangChain DocumentLoaders | 支持 PDF、TXT、MD |
 
 ## 项目结构
@@ -156,7 +156,7 @@ streamlit run main.py
 1. 点击侧边栏的"知识库管理"
 2. 选择文档类型（产品文档、技术文档、FAQ）
 3. 上传 PDF、TXT 或 Markdown 文件
-4. 系统自动处理并索引到 ChromaDB
+4. 系统自动处理并索引到 Milvus
 
 ### API 接口
 
@@ -199,7 +199,7 @@ streamlit run main.py
 文档处理（加载、分割）
    ↓
 并行索引
-   ├── 向量化（Zhipu AI embedding-2）→ ChromaDB
+   ├── 向量化（Zhipu AI embedding-2）→ Milvus
    └── BM25 索引（关键词统计）
    ↓
 混合检索（EnsembleRetriever + RRF 算法）
@@ -266,16 +266,19 @@ class NewAgent:
 
 ## 故障排除
 
-### 问题 1：ChromaDB 初始化失败
+### 问题 1：Milvus 初始化失败
 
 ```bash
-# ChromaDB 是纯 Python 实现，通常不会出现连接问题
+# Milvus Lite 本地模式（推荐用于开发）
 # 如果出现问题，检查依赖是否正确安装
 
-pip install chromadb langchain-chroma
+pip install pymilvus milvus
 
-# 检查持久化目录
-ls -la ./data/chroma
+# 检查数据库目录
+ls -la ./data/milvus
+
+# 如果使用 Milvus 服务器模式，确保服务器正在运行
+# docker run -d -p 19530:19530 milvusdb/milvus:latest
 ```
 
 ### 问题 2：Embeddings 下载失败
@@ -311,7 +314,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 - [LangGraph 文档](https://docs.langchain.com/oss/python/langgraph)
 - [FastAPI 文档](https://fastapi.tiangolo.com/)
 - [Streamlit 文档](https://docs.streamlit.io/)
-- [ChromaDB 文档](https://docs.trychroma.com/)
+- [Milvus 文档](https://milvus.io/docs)
 - [Zhipu AI 文档](https://open.bigmodel.cn/dev/api)
 
 ## 许可证

@@ -104,7 +104,7 @@ cs_system = CustomerServiceSystem(rag_engine=rag_engine)
 
 # 初始化知识库管理器（启用 RAG）
 print("[KB] Initializing knowledge base manager...")
-kb_manager = get_kb_manager(enable_rag=(rag_engine is not None))
+kb_manager = get_kb_manager(enable_rag=True, rag_engine=rag_engine)
 
 print("[OK] System initialization complete")
 

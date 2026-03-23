@@ -4,14 +4,24 @@ RAG 引擎模块
 本模块实现：
 - 文档加载和处理
 - 向量化（优先使用智谱 AI）
-- ChromaDB 向量存储集成（本地部署，无网络限制）
+- 向量存储集成（优先 Milvus，Windows 环境自动降级到 ChromaDB）
 - 语义检索
 - 知识库管理
+
+向量数据库选择：
+- 优先使用 Milvus（分布式、高性能）
+- Windows 环境下 Milvus Lite 不可用时，自动降级到 ChromaDB
+- 可通过环境变量 FORCE_VECTOR_DB 强制指定
+
+参考文档：
+- Milvus: https://langchain.cadn.net.cn/python/docs/integrations/vectorstores/milvus/index.html
+- ChromaDB: https://python.langchain.com/docs/integrations/vectorstores/chroma/
 """
 
 import os
 import sys
-from typing import List, Dict, Any, Optional
+import platform
+from typing import List, Dict, Any, Optional, Union
 from pathlib import Path
 from datetime import datetime
 import uuid
@@ -25,15 +35,67 @@ from langchain_community.document_loaders import (
     DirectoryLoader
 )
 
-# ChromaDB 向量存储
-from langchain_chroma import Chroma
-
 # 加载环境变量
 from dotenv import load_dotenv
 
 # 加载项目根目录的 .env 文件
 env_path = Path(__file__).parent.parent.parent.parent.parent / ".env"
 load_dotenv(env_path)
+
+
+# ==================== 向量数据库选择 ====================
+
+def _detect_vector_db() -> str:
+    """
+    检测可用的向量数据库
+
+    Returns:
+        'milvus' 或 'chroma'
+    """
+    # 检查环境变量强制指定
+    force_db = os.getenv("FORCE_VECTOR_DB", "").lower()
+    if force_db in ["milvus", "chroma"]:
+        return force_db
+
+    # 尝试导入 Milvus
+    try:
+        from langchain_milvus import Milvus
+        from pymilvus import connections
+
+        # 测试 Milvus Lite 连接（仅适用于 Linux/macOS）
+        test_uri = "./test_milvus_connection.db"
+        try:
+            # 尝试连接本地 Milvus Lite
+            connections.connect("test", uri=test_uri)
+            connections.disconnect("test")
+            # 清理测试文件
+            if os.path.exists(test_uri):
+                os.remove(test_uri)
+            print("[INFO] Milvus Lite 可用，将使用 Milvus 向量数据库")
+            return "milvus"
+        except Exception:
+            # Milvus Lite 不可用，可能是 Windows 环境
+            print("[WARN] Milvus Lite 不可用（Windows 不支持 milvus-lite）")
+            print("[INFO] 自动降级到 ChromaDB")
+            return "chroma"
+
+    except ImportError as e:
+        print(f"[WARN] 无法导入 Milvus: {e}")
+        print("[INFO] 自动降级到 ChromaDB")
+        return "chroma"
+
+
+# 检测可用的向量数据库
+VECTOR_DB_TYPE = _detect_vector_db()
+
+# 根据检测结果导入相应的向量存储
+if VECTOR_DB_TYPE == "milvus":
+    from langchain_milvus import Milvus
+    print("[OK] 使用 Milvus 向量数据库")
+else:
+    from langchain_chroma import Chroma
+    print("[OK] 使用 ChromaDB 向量数据库（Milvus Lite 在 Windows 上不可用）")
+    print("     提示：如需在 Windows 上使用 Milvus，请使用 Docker 或 WSL2")
 
 # ==================== 配置 HF Mirror ====================
 # 必须在导入 HuggingFace 之前设置
@@ -95,10 +157,47 @@ def get_embeddings():
         raise
 
 
-# ==================== ChromaDB 配置 ====================
+# ==================== 向量数据库配置 ====================
 
-# 持久化目录
+# Milvus 配置
+MILVUS_LITE_URI = os.getenv("MILVUS_LITE_URI", "./data/milvus/milvus_lite.db")
+MILVUS_COLLECTION_PREFIX = os.getenv("MILVUS_COLLECTION_PREFIX", "customer_service_kb")
+
+# ChromaDB 配置
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma")
+CHROMA_COLLECTION_PREFIX = os.getenv("CHROMA_COLLECTION_PREFIX", "customer_service_kb")
+
+
+def get_vector_db_config():
+    """
+    获取向量数据库配置
+
+    Returns:
+        配置字典，包含数据库类型、连接参数等
+    """
+    config = {"type": VECTOR_DB_TYPE}
+
+    if VECTOR_DB_TYPE == "milvus":
+        # 确保 Milvus Lite 数据目录存在
+        lite_db_path = Path(MILVUS_LITE_URI)
+        lite_db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        config.update({
+            "connection_args": {"uri": MILVUS_LITE_URI},
+            "index_params": {"index_type": "FLAT", "metric_type": "L2"},
+            "collection_prefix": MILVUS_COLLECTION_PREFIX
+        })
+    else:  # chroma
+        # 确保 ChromaDB 数据目录存在
+        persist_dir = Path(CHROMA_PERSIST_DIR)
+        persist_dir.mkdir(parents=True, exist_ok=True)
+
+        config.update({
+            "persist_directory": CHROMA_PERSIST_DIR,
+            "collection_prefix": CHROMA_COLLECTION_PREFIX
+        })
+
+    return config
 
 
 # ==================== 文档处理器 ====================
@@ -154,36 +253,92 @@ class DocumentProcessor:
 # ==================== RAG 引擎 ====================
 
 class RAGEngine:
-    """RAG 引擎（使用 ChromaDB）"""
+    """RAG 引擎（支持 Milvus 和 ChromaDB）"""
 
     def __init__(self):
         self.embeddings = get_embeddings()
-        self.collection_name = os.getenv("CHROMA_COLLECTION", "customer_service_kb")
+        self.vector_db_type = VECTOR_DB_TYPE
+        self.vector_db_config = get_vector_db_config()
         self.vector_stores = {}  # 按类别存储向量存储
         self.processor = DocumentProcessor()
 
-        # 确保持久化目录存在
-        Path(CHROMA_PERSIST_DIR).mkdir(parents=True, exist_ok=True)
+        # 初始化向量数据库
+        self._init_vector_db()
 
-        print(f"[OK] ChromaDB 初始化成功")
-        print(f"[INFO] 持久化目录: {CHROMA_PERSIST_DIR}")
+    def _init_vector_db(self):
+        """初始化向量数据库"""
+        if self.vector_db_type == "milvus":
+            print(f"[OK] Milvus 初始化成功")
+            print(f"[INFO] 本地数据库: {MILVUS_LITE_URI}")
+            print(f"[INFO] 使用 Milvus Lite 模式（本地文件存储）")
+        else:
+            print(f"[OK] ChromaDB 初始化成功")
+            print(f"[INFO] 本地数据库: {CHROMA_PERSIST_DIR}")
+            print(f"[INFO] 使用 ChromaDB 持久化存储")
 
-    def _get_vector_store(self, category: str) -> Chroma:
-        """获取或创建指定类别的向量存储"""
+    def _get_collection_name(self, category: str) -> str:
+        """
+        获取指定类别的集合名称
+
+        Args:
+            category: 知识库类别
+
+        Returns:
+            集合名称
+        """
+        # 集合名称只能包含字母、数字和下划线
+        safe_category = category.replace("-", "_").replace(" ", "_")
+        prefix = self.vector_db_config["collection_prefix"]
+        return f"{prefix}_{safe_category}"
+
+    def _get_vector_store(self, category: str) -> Optional[Any]:
+        """
+        获取或创建指定类别的向量存储
+
+        支持两种向量数据库：
+        - Milvus: 分布式高性能向量数据库
+        - ChromaDB: 本地向量数据库（Windows 降级选项）
+
+        Args:
+            category: 知识库类别
+
+        Returns:
+            向量存储实例（Milvus 或 ChromaDB）
+        """
         if category not in self.vector_stores:
-            persist_directory = os.path.join(CHROMA_PERSIST_DIR, category)
+            collection_name = self._get_collection_name(category)
 
-            self.vector_stores[category] = Chroma(
-                collection_name=f"{self.collection_name}_{category}",
-                embedding_function=self.embeddings,
-                persist_directory=persist_directory
-            )
+            try:
+                if self.vector_db_type == "milvus":
+                    # 使用 Milvus
+                    self.vector_stores[category] = Milvus(
+                        embedding_function=self.embeddings,
+                        collection_name=collection_name,
+                        connection_args=self.vector_db_config["connection_args"],
+                        index_params=self.vector_db_config["index_params"],
+                        drop_old=False  # 保留已有数据
+                    )
+                    print(f"[INFO] 加载 Milvus 集合: {collection_name}")
+                else:
+                    # 使用 ChromaDB
+                    self.vector_stores[category] = Chroma(
+                        collection_name=collection_name,
+                        embedding_function=self.embeddings,
+                        persist_directory=self.vector_db_config["persist_directory"]
+                    )
+                    print(f"[INFO] 加载 ChromaDB 集合: {collection_name}")
 
-        return self.vector_stores[category]
+            except Exception as e:
+                print(f"[ERROR] 向量数据库初始化失败: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+
+        return self.vector_stores.get(category)
 
     def index_document(self, file_path: str, category: str) -> Dict[str, Any]:
         """
-        索引单个文档到 ChromaDB
+        索引单个文档到向量数据库
 
         Args:
             file_path: 文件路径
@@ -212,8 +367,9 @@ class RAGEngine:
         # 3. 分割文档
         chunks = self.processor.split_documents(documents)
 
-        # 4. 向量化并存储到 ChromaDB
-        print(f"   [VECTOR] 开始向量化 {len(chunks)} 个文档块并存储到 ChromaDB...")
+        # 4. 向量化并存储
+        db_name = "Milvus" if self.vector_db_type == "milvus" else "ChromaDB"
+        print(f"   [VECTOR] 开始向量化 {len(chunks)} 个文档块并存储到 {db_name}...")
         print(f"   [INFO] 这可能需要一些时间，请耐心等待...")
 
         batch_size = 50  # 每批处理 50 个块
@@ -221,6 +377,8 @@ class RAGEngine:
 
         try:
             vector_store = self._get_vector_store(category)
+            if not vector_store:
+                raise Exception(f"无法获取 {db_name} 向量存储")
 
             for i in range(0, len(chunks), batch_size):
                 batch = chunks[i:i + batch_size]
@@ -228,7 +386,7 @@ class RAGEngine:
 
                 print(f"   [PROGRESS] 处理批次 {batch_num}/{total_batches} ({len(batch)} 个块)...")
 
-                # 添加文档到 ChromaDB
+                # 添加文档到向量数据库
                 vector_store.add_documents(batch)
 
                 print(f"   [OK] 批次 {batch_num}/{total_batches} 完成")
@@ -244,7 +402,7 @@ class RAGEngine:
             }
 
         except Exception as e:
-            print(f"[ERROR] ChromaDB 索引失败: {e}")
+            print(f"[ERROR] {db_name} 索引失败: {e}")
             raise
 
     def index_directory(self, directory: str, category: str) -> Dict[str, Any]:
@@ -273,10 +431,14 @@ class RAGEngine:
         chunks = self.processor.split_documents(documents)
 
         # 4. 向量化并存储
-        print("   [VECTOR] 向量化并存储到 ChromaDB...")
+        db_name = "Milvus" if self.vector_db_type == "milvus" else "ChromaDB"
+        print(f"   [VECTOR] 向量化并存储到 {db_name}...")
 
         try:
             vector_store = self._get_vector_store(category)
+            if not vector_store:
+                raise Exception(f"无法获取 {db_name} 向量存储")
+
             vector_store.add_documents(chunks)
 
             return {
@@ -287,7 +449,7 @@ class RAGEngine:
             }
 
         except Exception as e:
-            print(f"[ERROR] ChromaDB 索引失败: {e}")
+            print(f"[ERROR] {db_name} 索引失败: {e}")
             raise
 
     def search(self, query: str, category: str = None, k: int = 3) -> List[Document]:
@@ -305,19 +467,11 @@ class RAGEngine:
         try:
             if category:
                 # 搜索特定类别
-                if category not in self.vector_stores:
-                    # 尝试加载已存在的向量存储
-                    persist_directory = os.path.join(CHROMA_PERSIST_DIR, category)
-                    if Path(persist_directory).exists():
-                        self.vector_stores[category] = Chroma(
-                            collection_name=f"{self.collection_name}_{category}",
-                            embedding_function=self.embeddings,
-                            persist_directory=persist_directory
-                        )
-                    else:
-                        return []
+                vector_store = self._get_vector_store(category)
+                if not vector_store:
+                    print(f"[WARN] 类别 '{category}' 的向量存储不存在")
+                    return []
 
-                vector_store = self.vector_stores[category]
                 results = vector_store.similarity_search(query, k=k)
             else:
                 # 搜索所有类别
@@ -326,8 +480,7 @@ class RAGEngine:
                     cat_results = self.vector_stores[cat].similarity_search(query, k=k)
                     results.extend(cat_results)
 
-                # 按相似度排序（取前 k 个）
-                # ChromaDB 已经按相似度排序，所以直接去重并限制数量
+                # 按相似度排序并去重
                 unique_results = []
                 seen_content = set()
                 for doc in results:
@@ -342,7 +495,10 @@ class RAGEngine:
             return results
 
         except Exception as e:
-            print(f"[WARN] ChromaDB 搜索失败: {e}")
+            db_name = "Milvus" if self.vector_db_type == "milvus" else "ChromaDB"
+            print(f"[WARN] {db_name} 搜索失败: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
     def delete_documents(self, category: str, filter_dict: Dict = None) -> bool:
@@ -358,12 +514,14 @@ class RAGEngine:
         """
         try:
             if category in self.vector_stores:
-                # 删除整个集合
                 vector_store = self.vector_stores[category]
 
-                # 获取所有 ID 并删除
-                collection = vector_store._collection
-                collection.delete(where={"category": category})
+                if self.vector_db_type == "milvus":
+                    # Milvus 删除整个集合
+                    vector_store.delete_collection()
+                else:
+                    # ChromaDB 删除集合
+                    vector_store._collection.delete(where={"category": category})
 
                 # 从内存中移除
                 del self.vector_stores[category]
@@ -376,7 +534,36 @@ class RAGEngine:
 
         except Exception as e:
             print(f"[ERROR] 删除失败: {e}")
+            import traceback
+            traceback.print_exc()
             return False
+
+    def list_collections(self) -> List[str]:
+        """
+        列出所有集合
+
+        Returns:
+            集合名称列表
+        """
+        try:
+            if self.vector_db_type == "milvus":
+                from pymilvus import connections, utility
+
+                # 连接到 Milvus
+                connections.connect("default", **self.vector_db_config["connection_args"])
+
+                collections = utility.list_collections()
+                return collections
+            else:
+                # ChromaDB 列出集合
+                import chromadb
+                client = chromadb.PersistentClient(path=self.vector_db_config["persist_directory"])
+                collections = [col.name for col in client.list_collections()]
+                return collections
+
+        except Exception as e:
+            print(f"[ERROR] 获取集合列表失败: {e}")
+            return []
 
     def list_documents(self, category: str = None) -> List[Dict[str, Any]]:
         """
@@ -388,8 +575,7 @@ class RAGEngine:
         Returns:
             文档列表
         """
-        # ChromaDB 不直接支持列出所有文档
-        # 这里返回模拟数据，实际使用中可以维护一个文档索引数据库
+        # Milvus 返回模拟数据，实际使用中可以维护一个文档索引数据库
         return [
             {
                 "id": "doc-1",
@@ -418,7 +604,7 @@ def create_rag_engine():
 if __name__ == "__main__":
     # 测试 RAG 引擎
     print("=" * 60)
-    print("RAG 引擎测试 (ChromaDB)")
+    print("RAG 引擎测试 (Milvus)")
     print("=" * 60)
 
     try:
@@ -427,8 +613,13 @@ if __name__ == "__main__":
         rag = create_rag_engine()
         print("   [OK] 初始化完成")
 
-        # 2. 测试搜索（如果有数据）
-        print("\n2. 测试搜索功能...")
+        # 2. 列出集合
+        print("\n2. 列出所有集合...")
+        collections = rag.list_collections()
+        print(f"   找到 {len(collections)} 个集合: {collections}")
+
+        # 3. 测试搜索（如果有数据）
+        print("\n3. 测试搜索功能...")
         results = rag.search("蓝牙耳机连接", category="technical", k=2)
         print(f"   找到 {len(results)} 个相关文档")
 

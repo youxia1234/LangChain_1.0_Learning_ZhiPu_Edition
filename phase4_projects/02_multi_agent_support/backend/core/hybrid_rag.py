@@ -1,7 +1,7 @@
 """
 混合 RAG 检索引擎
 
-结合 BM25 关键词检索和 ChromaDB 向量检索，
+结合 BM25 关键词检索和向量检索（Milvus/ChromaDB），
 使用 EnsembleRetriever 实现 RRF (Reciprocal Rank Fusion) 算法融合结果。
 
 优势：
@@ -20,7 +20,7 @@ from langchain_community.retrievers import BM25Retriever
 from langchain_classic.retrievers import EnsembleRetriever
 
 # 本地模块导入
-from .rag import RAGEngine, get_embeddings
+from .rag import RAGEngine, get_embeddings, VECTOR_DB_TYPE
 
 
 class HybridRAGEngine(RAGEngine):
@@ -91,8 +91,8 @@ class HybridRAGEngine(RAGEngine):
             EnsembleRetriever 实例
         """
         if category not in self.ensemble_retrievers:
-            # 获取向量检索器
-            vector_store = self._get_vector_store(category, documents)
+            # 获取向量检索器（_get_vector_store 只需要 category 参数）
+            vector_store = self._get_vector_store(category)
             if not vector_store:
                 return None
 
@@ -196,34 +196,70 @@ class HybridRAGEngine(RAGEngine):
         """
         为指定类别更新 BM25 索引
 
+        支持两种向量数据库：
+        - Milvus: 使用 Milvus API 获取所有文档
+        - ChromaDB: 使用 ChromaDB API 获取所有文档
+
         Args:
             category: 知识库类别
         """
         try:
-            # 获取该类别的所有文档
-            persist_directory = os.path.join(
-                CHROMA_PERSIST_DIR,
-                category
-            )
-
-            if not Path(persist_directory).exists():
-                return
-
             # 从向量存储中获取所有文档
             vector_store = self._get_vector_store(category)
             if not vector_store:
                 return
 
-            # 获取所有文档数据
-            all_data = vector_store.get()
-            documents = [
-                Document(page_content=doc, metadata=meta or {})
-                for doc, meta in zip(all_data['documents'], all_data['metadatas'])
-            ]
+            documents = []
+
+            if self.vector_db_type == "milvus":
+                # 使用 Milvus API 获取文档
+                from pymilvus import connections, Collection
+
+                collection_name = self._get_collection_name(category)
+
+                # 连接到 Milvus
+                connections.connect("default", **self.vector_db_config["connection_args"])
+
+                # 获取集合
+                collection = Collection(collection_name)
+                collection.load()
+
+                # 获取所有文档（使用 expr 查询所有数据）
+                results = collection.query(
+                    expr="",
+                    output_fields=["*"]
+                )
+
+                # 构建文档列表
+                for result in results:
+                    # Milvus 存储文档内容和元数据
+                    text = result.get("text", "")
+                    metadata = {k: v for k, v in result.items() if k != "text"}
+                    documents.append(Document(page_content=text, metadata=metadata))
+
+            else:
+                # 使用 ChromaDB API 获取文档
+                import chromadb
+
+                collection_name = self._get_collection_name(category)
+                persist_dir = self.vector_db_config["persist_directory"]
+
+                # 连接到 ChromaDB
+                client = chromadb.PersistentClient(path=persist_dir)
+                collection = client.get_collection(name=collection_name)
+
+                # 获取所有文档
+                results = collection.get()
+
+                # 构建文档列表
+                for i, doc_id in enumerate(results.get('ids', [])):
+                    text = results.get('documents', [])[i] if i < len(results.get('documents', [])) else ""
+                    metadata = results.get('metadatas', [])[i] if i < len(results.get('metadatas', [])) else {}
+                    documents.append(Document(page_content=text, metadata=metadata))
 
             # 重新创建 BM25 检索器
             if documents:
-                # 清除旧的 BM25 检索器
+                # 清除旧的 BM25 检索器和混合检索器
                 if category in self.bm25_retrievers:
                     del self.bm25_retrievers[category]
                 if category in self.ensemble_retrievers:
@@ -235,11 +271,15 @@ class HybridRAGEngine(RAGEngine):
                     k=5
                 )
 
+                db_name = "Milvus" if self.vector_db_type == "milvus" else "ChromaDB"
                 print(f"[HybridRAG] 更新 {category} 类别的 BM25 索引")
                 print(f"[HybridRAG] 文档数量: {len(documents)}")
+                print(f"[HybridRAG] 向量数据库: {db_name}")
 
         except Exception as e:
             print(f"[ERROR] 更新 BM25 索引失败: {e}")
+            import traceback
+            traceback.print_exc()
 
     def compare_retrieval_methods(
         self,
@@ -288,6 +328,20 @@ class HybridRAGEngine(RAGEngine):
         return results
 
 
+    def _get_collection_name(self, category: str) -> str:
+        """
+        获取指定类别的集合名称（使用父类方法）
+
+        Args:
+            category: 知识库类别
+
+        Returns:
+            集合名称
+        """
+        # 调用父类方法以保持一致性
+        return super()._get_collection_name(category)
+
+
 # ==================== 便捷函数 ====================
 
 def create_hybrid_rag_engine(
@@ -329,7 +383,3 @@ def get_hybrid_rag_manager(enable_rag: bool = True) -> HybridRAGEngine:
         return None
 
     return create_hybrid_rag_engine()
-
-
-# 导入常量
-from .rag import CHROMA_PERSIST_DIR
