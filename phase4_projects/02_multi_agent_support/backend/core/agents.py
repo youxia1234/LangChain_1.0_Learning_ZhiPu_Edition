@@ -1,17 +1,17 @@
 """
-多代理系统核心模块
+企业智能问答系统 - 多代理核心模块
 
-本模块包含：
+面向制造企业官网场景，包含：
 - IntentClassifier: 意图分类器
-- TechSupportAgent: 技术支持代理（集成 RAG）
-- OrderServiceAgent: 订单服务代理
-- ProductConsultAgent: 产品咨询代理（集成 RAG）
+- ProductInfoAgent: 产品咨询代理（集成 RAG + 查询重写 + 重排序）
+- TechCapabilityAgent: 技术实力代理（集成 RAG）
+- CompanyOverviewAgent: 公司概况代理
+- PartnershipAgent: 合作咨询代理
 - QualityChecker: 质量检查器
-- CustomerServiceSystem: 系统编排器
+- EnterpriseQASystem: 系统编排器（LangGraph 工作流）
 """
 
 import os
-import sys
 import json
 from typing import List, Dict, Any, Optional, Literal
 from datetime import datetime
@@ -22,18 +22,17 @@ from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.documents import Document
 
-# LangGraph
 from langgraph.graph import StateGraph, START, END
 
-# 加载环境变量
+from .performance import default_cache
+
 from dotenv import load_dotenv
 
-# 加载项目根目录的 .env 文件
 env_path = Path(__file__).parent.parent.parent.parent.parent / ".env"
 load_dotenv(env_path)
 
-# 禁用 LangSmith 监控（避免 API 错误）
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
 os.environ["LANGCHAIN_ENDPOINT"] = ""
 
@@ -45,7 +44,7 @@ if not ZHIPUAI_API_KEY or ZHIPUAI_API_KEY == "your_zhipuai_api_key_here":
         "访问 https://open.bigmodel.cn/usercenter/apikeys 获取密钥"
     )
 
-# 初始化模型（使用智谱 AI）
+# 初始化模型
 model = ChatOpenAI(
     model="glm-4-flash",
     api_key=ZHIPUAI_API_KEY,
@@ -53,23 +52,15 @@ model = ChatOpenAI(
 )
 
 
-# ==================== JSON 解析辅助函数 ====================
+# ==================== JSON 解析辅助 ====================
 
 def safe_parse_json(text: str, default: dict = None) -> dict:
-    """
-    安全地解析JSON文本
-
-    处理：
-    - Markdown 代码块 (```json ... ```)
-    - 前后的空白字符
-    - 解析失败时返回默认值
-    """
+    """安全解析 JSON 文本"""
     if default is None:
         default = {}
 
     content = text.strip()
 
-    # 移除 Markdown 代码块
     if "```json" in content:
         try:
             content = content.split("```json")[1].split("```")[0]
@@ -91,59 +82,171 @@ def safe_parse_json(text: str, default: dict = None) -> dict:
         return default
 
 
-# ==================== 模拟数据库 ====================
+# ==================== 制造企业模拟数据 ====================
 
-MOCK_ORDERS = {
-    "ORD001": {
-        "status": "已发货",
-        "product": "智能手表 Pro",
-        "price": 1299,
-        "shipping": "顺丰快递",
-        "tracking": "SF1234567890",
-        "estimated_delivery": "2024-12-20"
-    },
-    "ORD002": {
-        "status": "处理中",
-        "product": "无线耳机 Max",
-        "price": 899,
-        "shipping": "待发货",
-        "tracking": None,
-        "estimated_delivery": "2024-12-22"
-    },
-    "ORD003": {
-        "status": "已完成",
-        "product": "便携充电宝",
-        "price": 199,
-        "shipping": "已签收",
-        "tracking": "YT9876543210",
-        "estimated_delivery": "2024-12-15"
-    }
+MOCK_COMPANY = {
+    "name": "华智精密制造有限公司",
+    "name_en": "Huazhi Precision Manufacturing Co., Ltd.",
+    "founded": 2008,
+    "employees": 1200,
+    "factory_area": "35000平方米",
+    "annual_revenue": "8.5亿元",
+    "location": "广东省深圳市光明新区科技产业园",
+    "description": "华智精密制造是一家专注于智能硬件和精密电子元器件研发与生产的高新技术企业，拥有16年行业经验。",
+    "core_advantages": [
+        "16年精密制造经验",
+        "1200+专业团队",
+        "全自动化生产线",
+        "ISO9001/IATF16949/CE/RoHS认证",
+        "年产能5000万件",
+        "7天快速打样"
+    ],
+    "milestones": [
+        {"year": 2008, "event": "公司成立，专注精密模具设计"},
+        {"year": 2012, "event": "通过 ISO9001 认证，进入消费电子领域"},
+        {"year": 2015, "event": "建成全自动化产线，产能提升5倍"},
+        {"year": 2018, "event": "通过 IATF16949 认证，进入汽车电子供应链"},
+        {"year": 2020, "event": "获得国家高新技术企业认定"},
+        {"year": 2023, "event": "年产值突破8亿元，员工超1200人"},
+    ]
 }
 
 MOCK_PRODUCTS = {
-    "智能手表 Pro": {
-        "price": 1299,
-        "features": ["心率监测", "GPS定位", "防水50米", "7天续航"],
-        "stock": 50,
-        "rating": 4.8
+    "HZ-WB200": {
+        "name": "华智智能手表 WB200",
+        "category": "智能穿戴",
+        "price_range": "¥180-320",
+        "moq": 1000,
+        "description": "高精度健康监测智能手表，支持心率/血氧/GPS，IP68防水",
+        "specs": {
+            "屏幕": "1.85英寸 AMOLED",
+            "防水": "IP68 (50米)",
+            "续航": "14天",
+            "传感器": "心率+血氧+加速度+陀螺仪",
+            "连接": "蓝牙5.3 / NFC",
+            "定位": "GPS+北斗+GLONASS"
+        },
+        "certifications": ["CE", "FCC", "RoHS", "REACH"],
+        "applications": ["品牌代工", "企业定制", "健康养老", "运动健身"],
     },
-    "无线耳机 Max": {
-        "price": 899,
-        "features": ["主动降噪", "40小时续航", "蓝牙5.3", "通话降噪"],
-        "stock": 120,
-        "rating": 4.6
+    "HZ-EP500": {
+        "name": "华智无线耳机 EP500",
+        "category": "智能音频",
+        "price_range": "¥120-250",
+        "moq": 2000,
+        "description": "主动降噪 TWS 耳机，40小时续航，Hi-Res 认证音质",
+        "specs": {
+            "降噪": "ANC 主动降噪 -42dB",
+            "续航": "单次8h / 总40h",
+            "蓝牙": "5.3 LE Audio",
+            "音频": "Hi-Res / LDAC",
+            "防水": "IPX5",
+            "充电": "无线充电 / USB-C"
+        },
+        "certifications": ["CE", "FCC", "RoHS", "BQB"],
+        "applications": ["品牌代工", "促销礼品", "电商专供"],
     },
-    "便携充电宝": {
-        "price": 199,
-        "features": ["20000mAh", "快充支持", "双USB输出", "LED显示"],
-        "stock": 200,
-        "rating": 4.5
+    "HZ-PC100": {
+        "name": "华智快充充电宝 PC100",
+        "category": "智能充电",
+        "price_range": "¥55-95",
+        "moq": 3000,
+        "description": "20000mAh 大容量，支持 65W PD 快充，三口输出",
+        "specs": {
+            "容量": "20000mAh (74Wh)",
+            "输入": "USB-C 65W PD",
+            "输出": "USB-C 65W + USB-A 22.5W ×2",
+            "电池": "21700 锂电池",
+            "重量": "380g",
+            "安全": "过充/过放/短路/温控保护"
+        },
+        "certifications": ["CE", "FCC", "RoHS", "PSE", "CQC"],
+        "applications": ["品牌代工", "企业礼品", "跨境电商"],
     },
-    "智能音箱": {
-        "price": 499,
-        "features": ["语音控制", "多房间音频", "智能家居联动", "Hi-Fi音质"],
-        "stock": 80,
-        "rating": 4.7
+    "HZ-TH800": {
+        "name": "华智工业温湿度传感器 TH800",
+        "category": "工业传感器",
+        "price_range": "¥35-68",
+        "moq": 5000,
+        "description": "高精度工业级温湿度传感器，RS485/Modbus 通信，IP65 防护",
+        "specs": {
+            "温度范围": "-40°C ~ +125°C",
+            "精度": "±0.3°C / ±2%RH",
+            "通信": "RS485 / Modbus RTU",
+            "供电": "DC 12-24V",
+            "防护": "IP65",
+            "接口": "M12 航空插头"
+        },
+        "certifications": ["CE", "RoHS", "FCC"],
+        "applications": ["工业自动化", "冷链监控", "智慧农业", "环境监测"],
+    },
+    "HZ-AC300": {
+        "name": "华智智能网关 AC300",
+        "category": "物联网设备",
+        "price_range": "¥150-280",
+        "moq": 500,
+        "description": "工业物联网边缘网关，支持 WiFi/4G/LoRa/以太网，边缘计算",
+        "specs": {
+            "处理器": "ARM Cortex-A7 1.2GHz",
+            "内存": "512MB DDR3",
+            "连接": "WiFi/4G/LoRa/以太网/RS485",
+            "协议": "MQTT/Modbus/OPC UA",
+            "供电": "DC 9-36V",
+            "工作温度": "-40°C ~ +75°C"
+        },
+        "certifications": ["CE", "FCC", "RoHS"],
+        "applications": ["智慧工厂", "智慧农业", "智慧城市", "能源管理"],
+    },
+}
+
+MOCK_CERTIFICATIONS = {
+    "ISO9001": {
+        "name": "ISO 9001:2015 质量管理体系",
+        "issued_by": "SGS",
+        "valid_until": "2026-12",
+        "scope": "精密电子元器件的设计、生产和销售"
+    },
+    "IATF16949": {
+        "name": "IATF 16949:2016 汽车质量管理体系",
+        "issued_by": "TÜV Rheinland",
+        "valid_until": "2027-03",
+        "scope": "汽车电子零部件的设计与制造"
+    },
+    "CE": {
+        "name": "CE 欧盟符合性认证",
+        "scope": "电磁兼容性 (EMC) + 低电压指令 (LVD)"
+    },
+    "RoHS": {
+        "name": "RoHS 2.0 有害物质限制",
+        "scope": "电子电气设备有害物质控制"
+    },
+    "HighTech": {
+        "name": "国家高新技术企业",
+        "issued_by": "广东省科技厅",
+        "valid_until": "2025-09"
+    },
+}
+
+MOCK_PARTNERSHIP = {
+    "oem": {
+        "name": "OEM 代工服务",
+        "description": "客户提供设计图纸/方案，我们负责生产制造、品质管控和物流配送",
+        "moq": "按产品类型不同，最低 500 件起",
+        "lead_time": "打样7天，量产15-30天",
+        "advantages": ["灵活起订量", "快速打样", "严格品控", "一站式物流"]
+    },
+    "odm": {
+        "name": "ODM 设计制造",
+        "description": "根据客户需求，提供从产品定义、ID设计、结构设计到生产制造的全流程服务",
+        "moq": "按项目复杂度协商",
+        "lead_time": "设计评估7天，首样20天，量产30天",
+        "advantages": ["自有设计团队", "专利共享", "定制化功能", "品牌授权"]
+    },
+    "custom": {
+        "name": "深度定制合作",
+        "description": "针对企业级客户，提供软硬件一体化定制方案，含APP开发、云平台对接",
+        "process": ["需求分析", "方案设计", "原型确认", "试产验证", "批量交付", "售后服务"],
+        "advantages": ["软硬件一体化", "专属项目经理", "售后技术支持", "数据安全合规"]
     }
 }
 
@@ -151,93 +254,112 @@ MOCK_PRODUCTS = {
 # ==================== 工具定义 ====================
 
 @tool
-def query_order(order_id: str) -> str:
-    """查询订单信息
+def search_product_catalog(keyword: str) -> str:
+    """搜索产品目录，按关键词查找匹配的产品信息
 
     Args:
-        order_id: 订单号，格式如 ORD001
+        keyword: 产品关键词（型号、类别或功能）
 
     Returns:
-        订单详情的JSON字符串
-    """
-    order = MOCK_ORDERS.get(order_id.upper())
-    if order:
-        return json.dumps(order, ensure_ascii=False, indent=2)
-    return f"未找到订单 {order_id}"
-
-@tool
-def track_shipping(tracking_number: str) -> str:
-    """查询物流信息
-
-    Args:
-        tracking_number: 物流单号
-
-    Returns:
-        物流状态信息
-    """
-    # 模拟物流信息
-    if tracking_number.startswith("SF"):
-        return f"顺丰快递 {tracking_number}: 包裹已到达配送站，预计今日送达"
-    elif tracking_number.startswith("YT"):
-        return f"圆通快递 {tracking_number}: 已签收"
-    return f"未找到物流信息 {tracking_number}"
-
-@tool
-def search_product(keyword: str) -> str:
-    """搜索产品信息
-
-    Args:
-        keyword: 产品关键词
-
-    Returns:
-        匹配产品的信息
+        匹配产品的详细信息
     """
     results = []
-    for name, info in MOCK_PRODUCTS.items():
-        if keyword.lower() in name.lower():
+    for model_id, info in MOCK_PRODUCTS.items():
+        search_text = f"{model_id} {info['name']} {info['category']} {info['description']} {' '.join(info['applications'])}"
+        if keyword.lower() in search_text.lower():
             results.append({
-                "name": name,
-                "price": f"¥{info['price']}",
-                "features": info['features'],
-                "rating": f"{info['rating']}分"
+                "model": model_id,
+                "name": info["name"],
+                "category": info["category"],
+                "price_range": info["price_range"],
+                "moq": info["moq"],
+                "description": info["description"],
+                "certifications": info["certifications"],
             })
 
     if results:
         return json.dumps(results, ensure_ascii=False, indent=2)
-    return f"未找到包含 '{keyword}' 的产品"
+    return f"未找到包含 '{keyword}' 的产品，您可以浏览我们的智能穿戴、智能音频、智能充电、工业传感器、物联网设备等品类。"
+
 
 @tool
-def get_product_recommendations(budget: int, category: str = "全部") -> str:
-    """根据预算推荐产品
+def get_certification_info(cert_name: str = "") -> str:
+    """查询公司资质认证信息
 
     Args:
-        budget: 预算金额
-        category: 产品类别（可选）
+        cert_name: 认证名称（如 ISO9001、CE、RoHS），留空返回所有认证
 
     Returns:
-        推荐产品列表
+        认证详细信息
+    """
+    if cert_name:
+        for key, info in MOCK_CERTIFICATIONS.items():
+            if cert_name.upper() in key.upper() or cert_name.upper() in info["name"].upper():
+                return json.dumps(info, ensure_ascii=False, indent=2)
+        return f"未找到 '{cert_name}' 相关的认证信息"
+
+    return json.dumps(MOCK_CERTIFICATIONS, ensure_ascii=False, indent=2)
+
+
+@tool
+def compare_products(model_a: str, model_b: str) -> str:
+    """对比两个产品的规格参数
+
+    Args:
+        model_a: 产品A型号（如 HZ-WB200）
+        model_b: 产品B型号（如 HZ-EP500）
+
+    Returns:
+        产品对比信息
+    """
+    product_a = MOCK_PRODUCTS.get(model_a.upper())
+    product_b = MOCK_PRODUCTS.get(model_b.upper())
+
+    if not product_a and not product_b:
+        return f"未找到型号 {model_a} 和 {model_b}"
+    if not product_a:
+        return f"未找到型号 {model_a}，可选型号: {', '.join(MOCK_PRODUCTS.keys())}"
+    if not product_b:
+        return f"未找到型号 {model_b}，可选型号: {', '.join(MOCK_PRODUCTS.keys())}"
+
+    comparison = {
+        model_a: {"name": product_a["name"], "specs": product_a["specs"], "price_range": product_a["price_range"]},
+        model_b: {"name": product_b["name"], "specs": product_b["specs"], "price_range": product_b["price_range"]},
+    }
+    return json.dumps(comparison, ensure_ascii=False, indent=2)
+
+
+@tool
+def get_solution_recommendation(application: str) -> str:
+    """根据应用场景推荐解决方案和产品
+
+    Args:
+        application: 应用场景（如 智慧工厂、品牌代工、健康养老、企业礼品）
+
+    Returns:
+        推荐的解决方案和产品列表
     """
     recommendations = []
-    for name, info in MOCK_PRODUCTS.items():
-        if info['price'] <= budget:
+    for model_id, info in MOCK_PRODUCTS.items():
+        if application.lower() in " ".join(info["applications"]).lower():
             recommendations.append({
-                "name": name,
-                "price": f"¥{info['price']}",
-                "rating": info['rating']
+                "model": model_id,
+                "name": info["name"],
+                "category": info["category"],
+                "price_range": info["price_range"],
+                "moq": info["moq"],
+                "why": f"适用于{application}场景，{info['description']}"
             })
 
-    # 按评分排序
-    recommendations.sort(key=lambda x: float(x['rating']), reverse=True)
-
     if recommendations:
-        return json.dumps(recommendations[:3], ensure_ascii=False, indent=2)
-    return f"在预算 ¥{budget} 内暂无推荐产品"
+        return json.dumps(recommendations, ensure_ascii=False, indent=2)
+    return f"暂无针对 '{application}' 场景的现成方案，请联系我们的业务团队进行定制化方案设计。"
 
 
 # ==================== 状态定义 ====================
 
-class CustomerServiceState(Dict):
-    """客服系统状态"""
+class EnterpriseQAState(Dict):
+    """企业问答系统状态"""
     user_message: str
     chat_history: List[Dict[str, str]]
     intent: str
@@ -247,247 +369,123 @@ class CustomerServiceState(Dict):
     escalation_reason: str
     quality_score: float
     metadata: Dict[str, Any]
-    sources: List[Dict[str, Any]]  # RAG 检索来源
+    sources: List[Dict[str, Any]]
+
+
+# ==================== RAG 辅助函数 ====================
+
+def _build_rag_context(rag_engine, query: str, category: str = None, k: int = 3) -> tuple:
+    """
+    构建 RAG 上下文（含引用溯源信息）
+
+    Returns:
+        (context_text, sources) 元组
+    """
+    if not rag_engine:
+        return "", []
+
+    try:
+        # 尝试混合检索
+        if hasattr(rag_engine, 'search_hybrid'):
+            results = rag_engine.search_hybrid(query, category=category, k=k)
+        else:
+            results = rag_engine.search(query, category=category, k=k)
+
+        if not results:
+            return "", []
+
+        context_parts = []
+        sources = []
+        for i, doc in enumerate(results):
+            source_name = doc.metadata.get("source", "知识库")
+            chunk_idx = doc.metadata.get("chunk_index", "")
+            context_parts.append(f"[来源{i+1}: {source_name}]{doc.page_content}")
+            sources.append({
+                "type": "knowledge_base",
+                "source": source_name,
+                "chunk_index": chunk_idx,
+                "preview": doc.page_content[:100] + "..."
+            })
+
+        return "\n\n".join(context_parts), sources
+
+    except Exception as e:
+        print(f"[RAG] 检索失败: {e}")
+        return "", []
 
 
 # ==================== 代理定义 ====================
 
 class IntentClassifier:
-    """意图分类器"""
+    """意图分类器 — 企业问答场景"""
 
     def __init__(self):
         self.llm = model
         self.prompt = ChatPromptTemplate.from_messages([
-            ("system", """你是一个意图分类专家。分析用户消息并返回意图分类。
+            ("system", """你是一个意图分类专家。分析访客对制造企业的提问，返回意图分类。
 
 可选意图：
-- tech_support: 技术问题、故障排除、使用帮助
-- order_service: 订单查询、物流跟踪、退换货
-- product_consult: 产品咨询、价格询问、功能介绍
-- escalate: 投诉、无法理解、需要人工
+- product_info: 产品咨询、型号查询、参数对比、价格、选型
+- tech_capability: 技术实力、生产工艺、质量管控、认证资质、研发能力
+- company_overview: 公司介绍、发展历程、规模、企业文化、荣誉
+- partnership: 合作咨询、代理政策、OEM/ODM、定制需求、商务对接
+- escalate: 超出范围、投诉、需要人工接待
 
 返回格式（JSON）：
 {{"intent": "意图类型", "confidence": 0.0-1.0, "reason": "分类原因"}}
 
-只返回JSON，不要其他内容。"""),
+只返回JSON。"""),
             ("human", "{message}")
         ])
 
     def classify(self, message: str) -> Dict[str, Any]:
-        """分类用户意图"""
         chain = self.prompt | self.llm | StrOutputParser()
         result = chain.invoke({"message": message})
-
-        # 使用安全的 JSON 解析
-        default_result = {"intent": "escalate", "confidence": 0.5, "reason": "解析失败"}
-        parsed = safe_parse_json(result, default_result)
-
-        # 确保返回有效的意图
+        default = {"intent": "company_overview", "confidence": 0.5, "reason": "解析失败"}
+        parsed = safe_parse_json(result, default)
         if "intent" not in parsed:
-            return default_result
+            return default
         return parsed
 
 
-class TechSupportAgent:
-    """技术支持代理（集成 RAG）"""
+class ProductInfoAgent:
+    """产品咨询代理（集成 RAG + 查询重写）"""
 
-    def __init__(self, rag_engine=None):
+    def __init__(self, rag_engine=None, query_processor=None):
         self.llm = model
         self.rag_engine = rag_engine
+        self.query_processor = query_processor
 
-        # 基础工具
-        tools = []
+        tools = [search_product_catalog, compare_products, get_solution_recommendation]
 
-        # 如果有 RAG 引擎，添加检索工具
         if self.rag_engine:
-            @tool
-            def search_technical_knowledge(query: str) -> str:
-                """从技术文档知识库中搜索解决方案"""
-                try:
-                    results = self.rag_engine.search(query, category="technical", k=3)
-                    return "\n\n".join([doc.page_content for doc in results])
-                except Exception as e:
-                    return f"知识库检索失败: {str(e)}"
+            agent_self = self
 
-            tools.append(search_technical_knowledge)
-
-        self.system_prompt = """你是一个专业的技术支持工程师。你的职责是：
-1. 分析用户遇到的技术问题
-2. 使用 search_technical_knowledge 工具从技术文档中查找解决方案
-3. 提供清晰的故障排除步骤
-4. 如果问题超出能力范围，建议升级到人工支持
-
-回复要求：
-- 语气友好专业
-- 步骤清晰有序
-- 提供多个可能的解决方案"""
-
-        # 创建 agent
-        self.agent = create_agent(
-            model=self.llm,
-            tools=tools,
-            system_prompt=self.system_prompt
-        )
-
-    def handle(self, message: str, chat_history: List = None) -> Dict[str, Any]:
-        """处理技术支持请求（同步）"""
-        messages = [{"role": "user", "content": message}]
-
-        result = self.agent.invoke({"messages": messages})
-
-        # 提取最终回复
-        if result["messages"]:
-            response = result["messages"][-1].content
-
-            # 检查是否有工具调用（RAG 检索）
-            sources = []
-            for msg in result["messages"]:
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    for call in msg.tool_calls:
-                        if "name" in call and call["name"] == "search_technical_knowledge":
-                            sources.append({
-                                "type": "knowledge_base",
-                                "tool": "search_technical_knowledge",
-                                "query": call["args"].get("query", "")
-                            })
-
-            return {
-                "response": response,
-                "sources": sources
-            }
-
-        return {
-            "response": "抱歉，我暂时无法处理您的问题。建议联系人工客服。",
-            "sources": []
-        }
-
-    def handle_stream(self, message: str, chat_history: List = None):
-        """
-        处理技术支持请求（流式输出）
-
-        使用 LLM 的 .stream() 方法逐 token 生成响应
-        """
-        try:
-            # 构建提示词（包含 RAG 上下文）
-            prompt = self.system_prompt + "\n\n"
-
-            # 如果有 RAG 引擎，检索相关文档
-            if self.rag_engine:
-                search_results = self.rag_engine.search(message, k=3)
-                if search_results:
-                    prompt += "参考信息：\n"
-                    for result in search_results:
-                        prompt += f"- {result.page_content}\n"
-                    prompt += "\n"
-
-            prompt += f"用户问题：{message}"
-
-            # 使用 LLM 的 stream 方法获取逐 token 输出
-            for chunk in self.llm.stream(prompt):
-                if hasattr(chunk, 'content') and chunk.content:
-                    yield chunk.content
-
-        except Exception as e:
-            print(f"[ERROR] 流式输出错误: {e}")
-            yield "抱歉，出现了一些问题。请稍后再试。"
-
-
-class OrderServiceAgent:
-    """订单服务代理"""
-
-    def __init__(self, rag_engine=None):
-        self.llm = model
-        self.tools = [query_order, track_shipping]
-
-        self.system_prompt = """你是一个专业的订单服务专员。你的职责是：
-1. 帮助用户查询订单状态
-2. 提供物流跟踪信息
-3. 解答退换货相关问题
-4. 使用工具获取准确信息
-
-回复要求：
-- 信息准确完整
-- 主动提供相关信息
-- 如果需要订单号，礼貌询问"""
-
-        self.agent = create_agent(
-            model=self.llm,
-            tools=self.tools,
-            system_prompt=self.system_prompt
-        )
-
-    def handle(self, message: str, chat_history: List = None) -> Dict[str, Any]:
-        """处理订单服务请求（同步）"""
-        messages = [{"role": "user", "content": message}]
-
-        result = self.agent.invoke({"messages": messages})
-
-        if result["messages"]:
-            return {
-                "response": result["messages"][-1].content,
-                "sources": []
-            }
-
-        return {
-            "response": "抱歉，订单查询服务暂时不可用。请稍后再试。",
-            "sources": []
-        }
-
-    def handle_stream(self, message: str, chat_history: List = None):
-        """
-        处理订单服务请求（流式输出）
-
-        使用 LLM 的 .stream() 方法逐 token 生成响应
-        """
-        try:
-            # 构建提示词
-            prompt = self.system_prompt + "\n\n"
-            prompt += f"用户问题：{message}"
-
-            # 使用 LLM 的 stream 方法获取逐 token 输出
-            for chunk in self.llm.stream(prompt):
-                if hasattr(chunk, 'content') and chunk.content:
-                    yield chunk.content
-
-        except Exception as e:
-            print(f"[ERROR] 流式输出错误: {e}")
-            yield "抱歉，出现了一些问题。请稍后再试。"
-
-
-class ProductConsultAgent:
-    """产品咨询代理（集成 RAG）"""
-
-    def __init__(self, rag_engine=None):
-        self.llm = model
-        self.rag_engine = rag_engine
-
-        # 基础工具
-        tools = [search_product, get_product_recommendations]
-
-        # 如果有 RAG 引擎，添加产品文档检索
-        if self.rag_engine:
             @tool
             def search_product_docs(query: str) -> str:
-                """从产品文档知识库中搜索信息"""
+                """从产品文档知识库中搜索详细信息"""
                 try:
-                    results = self.rag_engine.search(query, category="products", k=3)
-                    return "\n\n".join([doc.page_content for doc in results])
+                    results = agent_self.rag_engine.search(query, category="products", k=3)
+                    if not results:
+                        return "未找到相关产品文档"
+                    return "\n\n".join([f"[{doc.metadata.get('source', '知识库')}] {doc.page_content}" for doc in results])
                 except Exception as e:
-                    return f"产品文档检索失败: {str(e)}"
+                    return f"检索失败: {str(e)}"
 
             tools.append(search_product_docs)
 
-        self.system_prompt = """你是一个热情的产品顾问。你的职责是：
-1. 介绍产品功能和特点
-2. 使用 search_product_docs 工具从产品文档中查找详细信息
-3. 根据用户需求推荐合适的产品
-4. 使用工具获取最新产品信息
+        self.system_prompt = """你是华智精密制造的产品顾问。你的职责是：
+1. 根据访客需求介绍合适的产品，突出技术优势和应用场景
+2. 使用 search_product_catalog 工具查找产品目录
+3. 使用 compare_products 工具进行产品对比
+4. 使用 get_solution_recommendation 根据场景推荐方案
+5. 如有产品文档，使用 search_product_docs 查找详细规格
 
 回复要求：
-- 热情有亲和力
-- 突出产品优势
-- 根据用户需求推荐
-- 不要过度推销"""
+- 专业且有说服力，面向潜在客户
+- 突出产品的认证、品质和应用场景
+- 主动推荐适合的方案
+- 回复末尾标注信息来源"""
 
         self.agent = create_agent(
             model=self.llm,
@@ -496,65 +494,226 @@ class ProductConsultAgent:
         )
 
     def handle(self, message: str, chat_history: List = None) -> Dict[str, Any]:
-        """处理产品咨询请求（同步）"""
         messages = [{"role": "user", "content": message}]
-
         result = self.agent.invoke({"messages": messages})
 
         if result["messages"]:
             response = result["messages"][-1].content
-
-            # 检查是否有工具调用（RAG 检索）
             sources = []
             for msg in result["messages"]:
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     for call in msg.tool_calls:
-                        if "name" in call and call["name"] in ["search_product_docs", "search_product", "get_product_recommendations"]:
-                            sources.append({
-                                "type": "knowledge_base" if call["name"] == "search_product_docs" else "tool",
-                                "tool": call["name"],
-                                "query": call["args"].get("query", call["args"].get("keyword", ""))
-                            })
+                        sources.append({
+                            "type": "tool",
+                            "tool": call["name"],
+                            "query": str(call.get("args", {}))
+                        })
+            return {"response": response, "sources": sources}
 
-            return {
-                "response": response,
-                "sources": sources
-            }
-
-        return {
-            "response": "抱歉，产品信息查询暂时不可用。请稍后再试。",
-            "sources": []
-        }
+        return {"response": "抱歉，产品信息暂时无法查询，请稍后再试。", "sources": []}
 
     def handle_stream(self, message: str, chat_history: List = None):
-        """
-        处理产品咨询请求（流式输出）
-
-        使用 LLM 的 .stream() 方法逐 token 生成响应
-        """
         try:
-            # 构建提示词（包含 RAG 上下文）
+            # 查询重写
+            search_query = message
+            if self.query_processor:
+                try:
+                    processed = self.query_processor.process(message)
+                    search_query = processed["rewritten_query"]
+                except Exception:
+                    pass
+
             prompt = self.system_prompt + "\n\n"
-
-            # 如果有 RAG 引擎，检索相关文档
-            if self.rag_engine:
-                search_results = self.rag_engine.search(message, category="products", k=3)
-                if search_results:
-                    prompt += "参考信息：\n"
-                    for result in search_results:
-                        prompt += f"- {result.page_content}\n"
-                    prompt += "\n"
-
+            context, sources = _build_rag_context(self.rag_engine, search_query, category="products", k=3)
+            if context:
+                prompt += f"参考信息：\n{context}\n\n"
             prompt += f"用户问题：{message}"
 
-            # 使用 LLM 的 stream 方法获取逐 token 输出
             for chunk in self.llm.stream(prompt):
                 if hasattr(chunk, 'content') and chunk.content:
                     yield chunk.content
-
         except Exception as e:
             print(f"[ERROR] 流式输出错误: {e}")
-            yield "抱歉，出现了一些问题。请稍后再试。"
+            yield "抱歉，处理您的请求时出现问题。请稍后再试。"
+
+
+class TechCapabilityAgent:
+    """技术实力代理（集成 RAG）"""
+
+    def __init__(self, rag_engine=None, query_processor=None):
+        self.llm = model
+        self.rag_engine = rag_engine
+        self.query_processor = query_processor
+
+        tools = [get_certification_info]
+
+        if self.rag_engine:
+            agent_self = self
+
+            @tool
+            def search_tech_docs(query: str) -> str:
+                """从技术文档中搜索工艺、认证、质量管控相关信息"""
+                try:
+                    results = agent_self.rag_engine.search(query, category="capabilities", k=3)
+                    if not results:
+                        results = agent_self.rag_engine.search(query, category="technical", k=3)
+                    if not results:
+                        return "未找到相关技术文档"
+                    return "\n\n".join([f"[{doc.metadata.get('source', '知识库')}] {doc.page_content}" for doc in results])
+                except Exception as e:
+                    return f"检索失败: {str(e)}"
+
+            tools.append(search_tech_docs)
+
+        self.system_prompt = """你是华智精密制造的技术实力展示顾问。你的职责是：
+1. 展示公司的技术实力、生产工艺和质量管控体系
+2. 使用 get_certification_info 查询认证资质
+3. 如有技术文档，使用 search_tech_docs 查找详细信息
+4. 用数据和案例说话，增强说服力
+
+公司核心数据：
+- 成立于2008年，16年精密制造经验
+- 1200+专业团队，35000平方米现代化厂房
+- 年产能5000万件，年产值8.5亿元
+- ISO9001/IATF16949/CE/RoHS认证齐全
+- 全自动化生产线，7天快速打样
+
+回复要求：
+- 用具体数据和认证增强说服力
+- 展现专业性和可靠性
+- 适当提及行业案例和客户见证"""
+
+        self.agent = create_agent(
+            model=self.llm,
+            tools=tools,
+            system_prompt=self.system_prompt
+        )
+
+    def handle(self, message: str, chat_history: List = None) -> Dict[str, Any]:
+        messages = [{"role": "user", "content": message}]
+        result = self.agent.invoke({"messages": messages})
+
+        if result["messages"]:
+            sources = []
+            for msg in result["messages"]:
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for call in msg.tool_calls:
+                        sources.append({"type": "tool", "tool": call["name"], "query": str(call.get("args", {}))})
+            return {"response": result["messages"][-1].content, "sources": sources}
+
+        return {"response": "抱歉，技术实力信息暂时无法查询。", "sources": []}
+
+    def handle_stream(self, message: str, chat_history: List = None):
+        try:
+            search_query = message
+            if self.query_processor:
+                try:
+                    processed = self.query_processor.process(message)
+                    search_query = processed["rewritten_query"]
+                except Exception:
+                    pass
+
+            prompt = self.system_prompt + "\n\n"
+            context, _ = _build_rag_context(self.rag_engine, search_query, category="capabilities", k=3)
+            if context:
+                prompt += f"参考信息：\n{context}\n\n"
+            prompt += f"用户问题：{message}"
+
+            for chunk in self.llm.stream(prompt):
+                if hasattr(chunk, 'content') and chunk.content:
+                    yield chunk.content
+        except Exception as e:
+            print(f"[ERROR] 流式输出错误: {e}")
+            yield "抱歉，处理您的请求时出现问题。"
+
+
+class CompanyOverviewAgent:
+    """公司概况代理"""
+
+    def __init__(self, rag_engine=None, query_processor=None):
+        self.llm = model
+        self.rag_engine = rag_engine
+        self.query_processor = query_processor
+
+        self.system_prompt = f"""你是华智精密制造的公司介绍顾问。向访客介绍公司概况。
+
+公司基本信息：
+{json.dumps(MOCK_COMPANY, ensure_ascii=False, indent=2)}
+
+回复要求：
+- 热情专业，展现企业形象
+- 用发展历程和里程碑展示公司实力
+- 突出规模、资质和行业地位
+- 适当引导访客了解产品或合作方式"""
+
+    def handle(self, message: str, chat_history: List = None) -> Dict[str, Any]:
+        prompt = self.system_prompt + f"\n\n用户问题：{message}"
+
+        if self.rag_engine:
+            context, sources = _build_rag_context(self.rag_engine, message, category="company", k=2)
+            if context:
+                prompt = self.system_prompt + f"\n\n参考信息：\n{context}\n\n用户问题：{message}"
+            else:
+                sources = []
+        else:
+            sources = []
+
+        response = self.llm.invoke(prompt)
+        return {"response": response.content, "sources": sources}
+
+    def handle_stream(self, message: str, chat_history: List = None):
+        try:
+            prompt = self.system_prompt + "\n\n"
+
+            if self.rag_engine:
+                context, _ = _build_rag_context(self.rag_engine, message, category="company", k=2)
+                if context:
+                    prompt += f"参考信息：\n{context}\n\n"
+
+            prompt += f"用户问题：{message}"
+
+            for chunk in self.llm.stream(prompt):
+                if hasattr(chunk, 'content') and chunk.content:
+                    yield chunk.content
+        except Exception as e:
+            print(f"[ERROR] 流式输出错误: {e}")
+            yield "抱歉，处理您的请求时出现问题。"
+
+
+class PartnershipAgent:
+    """合作咨询代理"""
+
+    def __init__(self, rag_engine=None, query_processor=None):
+        self.llm = model
+        self.rag_engine = rag_engine
+        self.query_processor = query_processor
+
+        self.system_prompt = f"""你是华智精密制造的商务合作顾问。向潜在合作伙伴介绍合作方式。
+
+合作模式信息：
+{json.dumps(MOCK_PARTNERSHIP, ensure_ascii=False, indent=2)}
+
+回复要求：
+- 专业、热情、有说服力
+- 根据访客需求推荐合适的合作模式（OEM/ODM/深度定制）
+- 清晰说明合作流程、起订量、交付周期
+- 主动邀请进一步商务接洽
+- 提供联系方式：商务邮箱 business@huazhi-mfg.com，热线 400-888-7688"""
+
+    def handle(self, message: str, chat_history: List = None) -> Dict[str, Any]:
+        prompt = self.system_prompt + f"\n\n用户问题：{message}"
+        response = self.llm.invoke(prompt)
+        return {"response": response.content, "sources": []}
+
+    def handle_stream(self, message: str, chat_history: List = None):
+        try:
+            prompt = self.system_prompt + f"\n\n用户问题：{message}"
+            for chunk in self.llm.stream(prompt):
+                if hasattr(chunk, 'content') and chunk.content:
+                    yield chunk.content
+        except Exception as e:
+            print(f"[ERROR] 流式输出错误: {e}")
+            yield "抱歉，处理您的请求时出现问题。"
 
 
 class QualityChecker:
@@ -563,173 +722,187 @@ class QualityChecker:
     def __init__(self):
         self.llm = model
         self.prompt = ChatPromptTemplate.from_messages([
-            ("system", """你是客服质量检查专家。评估客服回复的质量。
+            ("system", """你是企业问答质量检查专家。评估 AI 回复的质量。
 
 评估维度：
-1. 相关性（0-25分）：回复是否针对用户问题
-2. 完整性（0-25分）：是否提供了足够的信息
-3. 专业性（0-25分）：语言是否专业得体
-4. 有用性（0-25分）：是否真正帮助到用户
+1. 相关性（0-25分）：是否针对访客问题
+2. 完整性（0-25分）：是否提供了足够信息
+3. 专业性（0-25分）：语言是否专业、有说服力
+4. 有用性（0-25分）：是否有助于访客了解公司/产品
 
 返回格式（JSON）：
 {{"total_score": 0-100, "needs_escalation": true/false, "reason": "评估说明"}}
 
 只返回JSON。"""),
-            ("human", """用户问题：{user_message}
-客服回复：{agent_response}
+            ("human", """访客问题：{user_message}
+AI回复：{agent_response}
 
 请评估：""")
         ])
 
     def check(self, user_message: str, agent_response: str) -> Dict[str, Any]:
-        """检查回复质量"""
         chain = self.prompt | self.llm | StrOutputParser()
-        result = chain.invoke({
-            "user_message": user_message,
-            "agent_response": agent_response
-        })
-
-        # 使用安全的 JSON 解析
-        default_result = {"total_score": 60, "needs_escalation": False, "reason": "评估完成"}
-        return safe_parse_json(result, default_result)
+        result = chain.invoke({"user_message": user_message, "agent_response": agent_response})
+        default = {"total_score": 70, "needs_escalation": False, "reason": "评估完成"}
+        return safe_parse_json(result, default)
 
 
-# ==================== 客服系统主类 ====================
+# ==================== 系统编排器 ====================
 
-class CustomerServiceSystem:
-    """多代理客服系统"""
+class EnterpriseQASystem:
+    """企业智能问答系统 — LangGraph 工作流编排"""
 
-    def __init__(self, rag_engine=None):
-        # 初始化组件
+    def __init__(self, rag_engine=None, enable_cache: bool = True):
+        """
+        初始化企业问答系统
+
+        Args:
+            rag_engine: RAG 引擎实例
+            enable_cache: 是否启用响应缓存
+        """
+        # 查询处理器和重排序器（惰性初始化）
+        self.query_processor = None
+        self.reranker = None
+
+        try:
+            from .query_processor import create_query_processor
+            self.query_processor = create_query_processor(enable_rewrite=True, enable_multi_query=False)
+        except Exception as e:
+            print(f"[WARN] 查询处理器初始化失败: {e}")
+
+        try:
+            from .reranker import create_reranker
+            self.reranker = create_reranker(enable_llm_rerank=False, top_k=5)
+        except Exception as e:
+            print(f"[WARN] 重排序器初始化失败: {e}")
+
+        # 初始化代理
         self.classifier = IntentClassifier()
-        self.tech_agent = TechSupportAgent(rag_engine)
-        self.order_agent = OrderServiceAgent(rag_engine)
-        self.product_agent = ProductConsultAgent(rag_engine)
+        self.product_agent = ProductInfoAgent(rag_engine, self.query_processor)
+        self.tech_agent = TechCapabilityAgent(rag_engine, self.query_processor)
+        self.company_agent = CompanyOverviewAgent(rag_engine, self.query_processor)
+        self.partnership_agent = PartnershipAgent(rag_engine, self.query_processor)
         self.quality_checker = QualityChecker()
 
-        # 构建工作流图
+        # 缓存
+        self.enable_cache = enable_cache
+        self._cache = default_cache if enable_cache else None
+
+        # 构建 LangGraph 工作流
         self.graph = self._build_graph()
+        print("[EnterpriseQA] 企业智能问答系统初始化完成")
 
     def _build_graph(self) -> StateGraph:
         """构建 LangGraph 工作流"""
 
-        def classify_intent(state: CustomerServiceState) -> CustomerServiceState:
-            """分类用户意图"""
-            print("[SEARCH] 分析用户意图...")
+        def classify_intent(state: EnterpriseQAState) -> EnterpriseQAState:
+            print("[INTENT] 分析访客意图...")
             result = self.classifier.classify(state["user_message"])
-
-            state["intent"] = result.get("intent", "escalate")
+            state["intent"] = result.get("intent", "company_overview")
             state["confidence"] = result.get("confidence", 0.5)
-
             print(f"   意图: {state['intent']} (置信度: {state['confidence']:.2f})")
             return state
 
-        def route_to_agent(state: CustomerServiceState) -> Literal["tech_support", "order_service", "product_consult", "escalate"]:
-            """路由到对应代理"""
+        def route_to_agent(state: EnterpriseQAState) -> Literal[
+            "product_info", "tech_capability", "company_overview", "partnership", "escalate"
+        ]:
             intent = state["intent"]
             confidence = state["confidence"]
 
-            # 低置信度直接升级
             if confidence < 0.6:
                 return "escalate"
 
-            if intent == "tech_support":
-                return "tech_support"
-            elif intent == "order_service":
-                return "order_service"
-            elif intent == "product_consult":
-                return "product_consult"
-            else:
-                return "escalate"
+            routing = {
+                "product_info": "product_info",
+                "tech_capability": "tech_capability",
+                "company_overview": "company_overview",
+                "partnership": "partnership",
+            }
+            return routing.get(intent, "escalate")
 
-        def tech_support_handler(state: CustomerServiceState) -> CustomerServiceState:
-            """技术支持处理"""
-            print("[TOOL] 技术支持代理处理中...")
-            result = self.tech_agent.handle(state["user_message"])
-            state["agent_response"] = result["response"]
-            state["sources"] = result.get("sources", [])
-            return state
-
-        def order_service_handler(state: CustomerServiceState) -> CustomerServiceState:
-            """订单服务处理"""
-            print("[PACKAGE] 订单服务代理处理中...")
-            result = self.order_agent.handle(state["user_message"])
-            state["agent_response"] = result["response"]
-            state["sources"] = result.get("sources", [])
-            return state
-
-        def product_consult_handler(state: CustomerServiceState) -> CustomerServiceState:
-            """产品咨询处理"""
-            print("[SHOP] 产品咨询代理处理中...")
+        def product_info_handler(state: EnterpriseQAState) -> EnterpriseQAState:
+            print("[PRODUCT] 产品咨询代理处理中...")
             result = self.product_agent.handle(state["user_message"])
             state["agent_response"] = result["response"]
             state["sources"] = result.get("sources", [])
             return state
 
-        def escalate_handler(state: CustomerServiceState) -> CustomerServiceState:
-            """升级处理"""
-            print("[PERSON] 升级到人工客服...")
+        def tech_capability_handler(state: EnterpriseQAState) -> EnterpriseQAState:
+            print("[TECH] 技术实力代理处理中...")
+            result = self.tech_agent.handle(state["user_message"])
+            state["agent_response"] = result["response"]
+            state["sources"] = result.get("sources", [])
+            return state
+
+        def company_overview_handler(state: EnterpriseQAState) -> EnterpriseQAState:
+            print("[COMPANY] 公司概况代理处理中...")
+            result = self.company_agent.handle(state["user_message"])
+            state["agent_response"] = result["response"]
+            state["sources"] = result.get("sources", [])
+            return state
+
+        def partnership_handler(state: EnterpriseQAState) -> EnterpriseQAState:
+            print("[PARTNER] 合作咨询代理处理中...")
+            result = self.partnership_agent.handle(state["user_message"])
+            state["agent_response"] = result["response"]
+            state["sources"] = result.get("sources", [])
+            return state
+
+        def escalate_handler(state: EnterpriseQAState) -> EnterpriseQAState:
+            print("[ESCALATE] 转接人工...")
             state["needs_escalation"] = True
-            state["escalation_reason"] = "意图识别置信度低或用户要求人工服务"
-            state["agent_response"] = """非常抱歉，您的问题需要人工客服来处理。
+            state["escalation_reason"] = "意图识别置信度低或需要人工接待"
+            state["agent_response"] = """感谢您的咨询！您的问题需要我们的专业团队为您详细解答。
 
-我已经为您转接人工客服，请稍候...
+您可以通过以下方式联系我们：
+1. 商务热线：400-888-7688
+2. 商务邮箱：business@huazhi-mfg.com
+3. 工作日 9:00-18:00，响应更及时
 
-在等待期间，您也可以：
-1. 拨打客服热线：400-xxx-xxxx
-2. 发送邮件至：support@example.com
-3. 工作日 9:00-18:00 在线客服响应更快
-
-感谢您的耐心等待！"""
+我们的专业团队将在第一时间为您提供详细的解决方案。"""
             state["sources"] = []
             return state
 
-        def quality_check(state: CustomerServiceState) -> CustomerServiceState:
-            """质量检查"""
-            print("[OK] 执行质量检查...")
+        def quality_check(state: EnterpriseQAState) -> EnterpriseQAState:
+            print("[QA] 执行质量检查...")
             result = self.quality_checker.check(
                 state["user_message"],
                 state["agent_response"]
             )
-
             state["quality_score"] = result.get("total_score", 0) / 100
-
-            # 质量太低需要升级
-            if result.get("needs_escalation", False) or state["quality_score"] < 0.6:
+            if result.get("needs_escalation", False) or state["quality_score"] < 0.5:
                 state["needs_escalation"] = True
                 state["escalation_reason"] = result.get("reason", "质量检查未通过")
-
             print(f"   质量评分: {state['quality_score']:.2f}")
             return state
 
-        def should_escalate(state: CustomerServiceState) -> Literal["escalate_final", "respond"]:
-            """判断是否需要升级"""
+        def should_escalate(state: EnterpriseQAState) -> Literal["escalate_final", "respond"]:
             if state.get("needs_escalation", False):
                 return "escalate_final"
             return "respond"
 
-        def final_escalate(state: CustomerServiceState) -> CustomerServiceState:
-            """最终升级处理"""
-            # 保留原始回复但添加升级提示
-            original_response = state["agent_response"]
-            state["agent_response"] = f"""{original_response}
+        def final_escalate(state: EnterpriseQAState) -> EnterpriseQAState:
+            original = state["agent_response"]
+            state["agent_response"] = f"""{original}
 
 ---
-[WARN] 系统提示：由于此问题可能需要更专业的处理，我们建议您联系人工客服以获得更好的服务。"""
+温馨提示：如需更详细的解答，欢迎联系我们的专业团队：
+- 商务热线：400-888-7688
+- 邮箱：business@huazhi-mfg.com"""
             return state
 
-        def respond(state: CustomerServiceState) -> CustomerServiceState:
-            """最终响应"""
+        def respond(state: EnterpriseQAState) -> EnterpriseQAState:
             return state
 
         # 构建图
-        graph = StateGraph(CustomerServiceState)
+        graph = StateGraph(EnterpriseQAState)
 
         # 添加节点
         graph.add_node("classify", classify_intent)
-        graph.add_node("tech_support", tech_support_handler)
-        graph.add_node("order_service", order_service_handler)
-        graph.add_node("product_consult", product_consult_handler)
+        graph.add_node("product_info", product_info_handler)
+        graph.add_node("tech_capability", tech_capability_handler)
+        graph.add_node("company_overview", company_overview_handler)
+        graph.add_node("partnership", partnership_handler)
         graph.add_node("escalate", escalate_handler)
         graph.add_node("quality_check", quality_check)
         graph.add_node("escalate_final", final_escalate)
@@ -738,25 +911,26 @@ class CustomerServiceSystem:
         # 添加边
         graph.add_edge(START, "classify")
 
-        # 条件路由
         graph.add_conditional_edges(
             "classify",
             route_to_agent,
             {
-                "tech_support": "tech_support",
-                "order_service": "order_service",
-                "product_consult": "product_consult",
+                "product_info": "product_info",
+                "tech_capability": "tech_capability",
+                "company_overview": "company_overview",
+                "partnership": "partnership",
                 "escalate": "escalate"
             }
         )
 
-        # 代理处理后进行质量检查
-        graph.add_edge("tech_support", "quality_check")
-        graph.add_edge("order_service", "quality_check")
-        graph.add_edge("product_consult", "quality_check")
+        # 代理 → 质量检查
+        graph.add_edge("product_info", "quality_check")
+        graph.add_edge("tech_capability", "quality_check")
+        graph.add_edge("company_overview", "quality_check")
+        graph.add_edge("partnership", "quality_check")
         graph.add_edge("escalate", END)
 
-        # 质量检查后的条件路由
+        # 质量检查 → 最终路由
         graph.add_conditional_edges(
             "quality_check",
             should_escalate,
@@ -774,10 +948,16 @@ class CustomerServiceSystem:
     def handle_message(self, message: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
         """处理用户消息（同步）"""
         print(f"\n{'='*60}")
-        print(f"[CHAT] 用户: {message}")
+        print(f"[Q&A] 访客: {message}")
         print('='*60)
 
-        initial_state = CustomerServiceState(
+        if self.enable_cache and self._cache:
+            cached_result = self._cache.get(message, agent_type="enterprise_qa")
+            if cached_result is not None:
+                print("[CACHE] 命中缓存")
+                return cached_result
+
+        initial_state = EnterpriseQAState(
             user_message=message,
             chat_history=chat_history or [],
             intent="",
@@ -792,7 +972,7 @@ class CustomerServiceSystem:
 
         result = self.graph.invoke(initial_state)
 
-        return {
+        response = {
             "response": result["agent_response"],
             "intent": result["intent"],
             "confidence": result["confidence"],
@@ -801,19 +981,20 @@ class CustomerServiceSystem:
             "sources": result.get("sources", [])
         }
 
-    def handle_message_stream(self, message: str, chat_history: List[Dict] = None):
-        """
-        处理用户消息（真正的流式输出）
+        if self.enable_cache and self._cache:
+            self._cache.set(message, response, agent_type="enterprise_qa")
 
-        逐 token 生成响应，实现打字机效果
-        """
+        return response
+
+    def handle_message_stream(self, message: str, chat_history: List[Dict] = None):
+        """处理用户消息（流式输出）"""
         print(f"\n{'='*60}")
-        print(f"[CHAT STREAM] 用户: {message}")
+        print(f"[Q&A STREAM] 访客: {message}")
         print('='*60)
 
-        # 1. 首先发送意图识别结果
+        # 1. 意图识别
         result = self.classifier.classify(message)
-        intent = result.get("intent", "unknown")
+        intent = result.get("intent", "company_overview")
         confidence = result.get("confidence", 0.0)
 
         yield {
@@ -823,60 +1004,31 @@ class CustomerServiceSystem:
             "done": False
         }
 
-        # 2. 根据意图选择对应的代理进行流式输出
+        # 2. 路由到对应代理流式输出
         try:
-            if intent == "tech_support":
-                # 使用技术支持代理的流式方法
-                for chunk in self.tech_agent.handle_stream(message):
-                    yield {
-                        "type": "content",
-                        "content": chunk,
-                        "done": False
-                    }
+            agent_map = {
+                "product_info": self.product_agent,
+                "tech_capability": self.tech_agent,
+                "company_overview": self.company_agent,
+                "partnership": self.partnership_agent,
+            }
 
-            elif intent == "order_service":
-                # 使用订单服务代理的流式方法
-                for chunk in self.order_agent.handle_stream(message):
-                    yield {
-                        "type": "content",
-                        "content": chunk,
-                        "done": False
-                    }
-
-            elif intent == "product_consult":
-                # 使用产品咨询代理的流式方法
-                for chunk in self.product_agent.handle_stream(message):
-                    yield {
-                        "type": "content",
-                        "content": chunk,
-                        "done": False
-                    }
-
+            if intent in agent_map:
+                for chunk in agent_map[intent].handle_stream(message):
+                    yield {"type": "content", "content": chunk, "done": False}
             else:
-                # 升级到人工客服
-                escalate_message = """非常抱歉，您的问题需要人工客服来处理。
+                escalate_msg = """感谢您的咨询！您的问题需要我们的专业团队为您详细解答。
 
-我已经为您转接人工客服，请稍候...
+联系方式：
+1. 商务热线：400-888-7688
+2. 商务邮箱：business@huazhi-mfg.com
+3. 工作日 9:00-18:00"""
+                for i in range(0, len(escalate_msg), 15):
+                    yield {"type": "content", "content": escalate_msg[i:i+15], "done": False}
 
-在等待期间，您也可以：
-1. 拨打客服热线：400-xxx-xxxx
-2. 发送邮件至：support@example.com
-3. 工作日 9:00-18:00 在线客服响应更快
-
-感谢您的耐心等待！"""
-
-                # 分段发送升级消息
-                for i in range(0, len(escalate_message), 15):
-                    chunk = escalate_message[i:i + 15]
-                    yield {
-                        "type": "content",
-                        "content": chunk,
-                        "done": False
-                    }
-
-            # 3. 获取完整结果（用于元数据）
+            # 3. 获取完整元数据
             final_result = self.graph.invoke(
-                CustomerServiceState(
+                EnterpriseQAState(
                     user_message=message,
                     chat_history=chat_history or [],
                     intent=intent,
@@ -890,20 +1042,13 @@ class CustomerServiceSystem:
                 )
             )
 
-            # 4. 发送最终结果
-            # 确保 sources 可以被 JSON 序列化
             sources = final_result.get("sources", [])
-            # 将 sources 转换为可序列化的格式
             serializable_sources = []
-            for source in sources:
-                if isinstance(source, dict):
-                    serializable_sources.append(source)
+            for s in sources:
+                if isinstance(s, dict):
+                    serializable_sources.append(s)
                 else:
-                    # 如果是 Document 对象或其他对象，转换为字典
-                    serializable_sources.append({
-                        "type": str(type(source).__name__),
-                        "content": str(source) if hasattr(source, 'page_content') else str(source)
-                    })
+                    serializable_sources.append({"type": str(type(s).__name__), "content": str(s)})
 
             yield {
                 "type": "final",
@@ -918,16 +1063,11 @@ class CustomerServiceSystem:
 
         except Exception as e:
             print(f"[ERROR] 流式输出错误: {e}")
-            # 发生错误时返回错误消息
-            yield {
-                "type": "content",
-                "content": "抱歉，处理您的请求时出现了错误。请稍后再试。",
-                "done": False
-            }
+            yield {"type": "content", "content": "抱歉，处理您的请求时出现了错误。请稍后再试。", "done": False}
+            yield {"type": "error", "error": str(e), "done": True}
 
-            # 发送完成标记
-            yield {
-                "type": "error",
-                "error": str(e),
-                "done": True
-            }
+
+# ==================== 向后兼容别名 ====================
+
+# 保持与 backend/main.py 的兼容性
+CustomerServiceSystem = EnterpriseQASystem

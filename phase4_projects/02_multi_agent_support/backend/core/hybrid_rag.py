@@ -1,16 +1,17 @@
 """
-混合 RAG 检索引擎
+混合 RAG 检索引擎（优化版）
 
 结合 BM25 关键词检索和向量检索（Milvus/ChromaDB），
 使用 EnsembleRetriever 实现 RRF (Reciprocal Rank Fusion) 算法融合结果。
 
-优势：
-- BM25：精确匹配专有名词、版本号、代码片段
-- 向量检索：理解语义和同义词
-- 混合检索：结合两者优势，全面覆盖
+优化内容：
+- BM25 索引持久化（序列化到磁盘，启动时自动加载）
+- 集成 Reranker 重排序（检索后二次评分）
+- 支持 MMR 多样性检索
 """
 
 import os
+import pickle
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
@@ -38,7 +39,6 @@ class HybridRAGEngine(RAGEngine):
         Args:
             bm25_weight: BM25 检索权重 (0-1)
             vector_weight: 向量检索权重 (0-1)
-                           两者之和应该为 1.0
         """
         super().__init__()
         self.bm25_weight = bm25_weight
@@ -50,9 +50,26 @@ class HybridRAGEngine(RAGEngine):
         # Ensemble 检索器缓存（按类别存储）
         self.ensemble_retrievers: Dict[str, EnsembleRetriever] = {}
 
+        # BM25 持久化目录
+        self.bm25_persist_dir = Path(os.getenv("BM25_PERSIST_DIR", "./data/bm25"))
+        self.bm25_persist_dir.mkdir(parents=True, exist_ok=True)
+
+        # Reranker（惰性初始化）
+        self.reranker = None
+        try:
+            from .reranker import create_reranker
+            self.reranker = create_reranker(enable_llm_rerank=False, top_k=5)
+            print("[HybridRAG] 重排序器已加载")
+        except Exception as e:
+            print(f"[HybridRAG] 重排序器加载失败: {e}")
+
+        # 启动时自动加载已持久化的 BM25 索引
+        self._load_bm25_indices()
+
         print(f"[HybridRAG] 初始化混合检索引擎")
         print(f"[HybridRAG] BM25 权重: {bm25_weight:.1%}")
         print(f"[HybridRAG] 向量权重: {vector_weight:.1%}")
+        print(f"[HybridRAG] BM25 持久化目录: {self.bm25_persist_dir}")
 
     def _get_bm25_retriever(self, category: str, documents: List[Document] = None) -> BM25Retriever:
         """
@@ -118,50 +135,54 @@ class HybridRAGEngine(RAGEngine):
         self,
         query: str,
         category: str = None,
-        k: int = 3
+        k: int = 3,
+        use_reranker: bool = True
     ) -> List[Document]:
         """
-        混合检索（推荐使用）
+        混合检索（推荐使用，含重排序）
 
-        结合 BM25 关键词检索和向量语义检索，
-        使用 RRF 算法融合结果。
+        流程：BM25 + 向量 → RRF 融合 → Re-ranking → 返回 Top-K
 
         Args:
             query: 搜索查询
             category: 知识库类别（None 表示搜索所有）
             k: 返回结果数量
+            use_reranker: 是否使用重排序器
 
         Returns:
             相关文档列表
         """
         try:
+            # 过采样以给重排序器留空间
+            retrieve_k = k * 3 if use_reranker else k
+
             if category:
-                # 搜索特定类别
                 ensemble_retriever = self._get_ensemble_retriever(category)
                 if not ensemble_retriever:
                     print(f"[WARN] 类别 {category} 的混合检索器未初始化")
-                    # 回退到纯向量检索
                     return self.search(query, category=category, k=k)
 
                 results = ensemble_retriever.invoke(query)
-                return results[:k]
             else:
-                # 搜索所有类别：分别搜索后合并
                 all_results = []
-
                 for cat in self.vector_stores.keys():
                     ensemble_retriever = self._get_ensemble_retriever(cat)
                     if ensemble_retriever:
-                        results = ensemble_retriever.invoke(query)
-                        all_results.extend(results)
+                        cat_results = ensemble_retriever.invoke(query)
+                        all_results.extend(cat_results)
+                results = all_results
 
-                # 按相关性排序（EnsembleRetriever 已排序）
-                return all_results[:k]
+            # Reranker 重排序
+            if use_reranker and self.reranker and results:
+                results = self.reranker.rerank(query, results, top_k=k)
+            else:
+                results = results[:k]
+
+            return results
 
         except Exception as e:
             print(f"[ERROR] 混合检索失败: {e}")
             print(f"[WARN] 回退到纯向量检索")
-            # 回退到纯向量检索
             return self.search(query, category=category, k=k)
 
     def index_document_hybrid(
@@ -191,6 +212,41 @@ class HybridRAGEngine(RAGEngine):
             result["message"] += " | 已添加到 BM25 索引"
 
         return result
+
+    def _get_bm25_persist_path(self, category: str) -> Path:
+        """获取 BM25 索引的持久化文件路径"""
+        return self.bm25_persist_dir / f"{category}.pkl"
+
+    def _save_bm25_index(self, category: str):
+        """将 BM25 索引序列化到磁盘"""
+        if category not in self.bm25_retrievers:
+            return
+        try:
+            persist_path = self._get_bm25_persist_path(category)
+            with open(persist_path, "wb") as f:
+                pickle.dump(self.bm25_retrievers[category], f)
+            print(f"[HybridRAG] BM25 索引已持久化: {persist_path}")
+        except Exception as e:
+            print(f"[HybridRAG] BM25 持久化失败: {e}")
+
+    def _load_bm25_indices(self):
+        """启动时自动加载已持久化的 BM25 索引"""
+        if not self.bm25_persist_dir.exists():
+            return
+
+        loaded = 0
+        for pkl_file in self.bm25_persist_dir.glob("*.pkl"):
+            category = pkl_file.stem
+            try:
+                with open(pkl_file, "rb") as f:
+                    self.bm25_retrievers[category] = pickle.load(f)
+                loaded += 1
+                print(f"[HybridRAG] 加载 BM25 索引: {category}")
+            except Exception as e:
+                print(f"[HybridRAG] 加载 BM25 索引失败 ({category}): {e}")
+
+        if loaded:
+            print(f"[HybridRAG] 已加载 {loaded} 个 BM25 索引")
 
     def _update_bm25_for_category(self, category: str):
         """
@@ -275,6 +331,9 @@ class HybridRAGEngine(RAGEngine):
                 print(f"[HybridRAG] 更新 {category} 类别的 BM25 索引")
                 print(f"[HybridRAG] 文档数量: {len(documents)}")
                 print(f"[HybridRAG] 向量数据库: {db_name}")
+
+                # 持久化 BM25 索引到磁盘
+                self._save_bm25_index(category)
 
         except Exception as e:
             print(f"[ERROR] 更新 BM25 索引失败: {e}")

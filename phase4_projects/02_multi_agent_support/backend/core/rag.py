@@ -203,13 +203,18 @@ def get_vector_db_config():
 # ==================== 文档处理器 ====================
 
 class DocumentProcessor:
-    """文档处理器"""
+    """文档处理器（优化：语义分块 + 元数据增强）"""
 
     def __init__(self):
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=800,
-            chunk_overlap=150,
-            separators=["\n\n", "\n", "。", "！", "？", ".", "!", "?", " ", ""]
+            chunk_size=1200,
+            chunk_overlap=200,
+            separators=[
+                "\n## ", "\n### ", "\n\n", "\n",
+                "。", "！", "？", "；",
+                ".", "!", "?", ";",
+                " ", ""
+            ]
         )
         self.embeddings = get_embeddings()
 
@@ -240,14 +245,29 @@ class DocumentProcessor:
         return chunks
 
     def add_metadata(self, documents: List[Document], category: str, source: str) -> List[Document]:
-        """添加元数据"""
-        for doc in documents:
+        """添加元数据（增强版：含关键词和文档标题）"""
+        for i, doc in enumerate(documents):
             doc.metadata.update({
                 "category": category,
                 "source": source,
-                "upload_date": datetime.now().isoformat()
+                "doc_title": Path(source).stem if source else "unknown",
+                "chunk_index": i,
+                "upload_date": datetime.now().isoformat(),
+                "keywords": self._extract_keywords(doc.page_content),
             })
         return documents
+
+    @staticmethod
+    def _extract_keywords(text: str, max_keywords: int = 5) -> List[str]:
+        """简单关键词提取（基于词频，中文友好的 fallback）"""
+        # 去除标点和空白
+        import re
+        cleaned = re.sub(r'[^\w\u4e00-\u9fff]', ' ', text)
+        words = [w for w in cleaned.split() if len(w) >= 2]
+        # 统计词频，取前 N 个
+        from collections import Counter
+        counter = Counter(words)
+        return [w for w, _ in counter.most_common(max_keywords)]
 
 
 # ==================== RAG 引擎 ====================
@@ -567,7 +587,7 @@ class RAGEngine:
 
     def list_documents(self, category: str = None) -> List[Dict[str, Any]]:
         """
-        列出知识库中的文档
+        列出知识库中的文档（从上传目录扫描实际文件）
 
         Args:
             category: 知识库类别
@@ -575,23 +595,36 @@ class RAGEngine:
         Returns:
             文档列表
         """
-        # Milvus 返回模拟数据，实际使用中可以维护一个文档索引数据库
-        return [
-            {
-                "id": "doc-1",
-                "filename": "product_manual.pdf",
-                "category": "products",
-                "chunks": 15,
-                "upload_date": "2024-12-20T10:00:00Z"
-            },
-            {
-                "id": "doc-2",
-                "filename": "troubleshooting_guide.pdf",
-                "category": "technical",
-                "chunks": 25,
-                "upload_date": "2024-12-20T11:00:00Z"
-            }
-        ]
+        from datetime import datetime as dt
+
+        documents = []
+        upload_dir = Path(os.getenv("UPLOAD_DIR", "./data/uploads"))
+
+        if not upload_dir.exists():
+            return documents
+
+        for category_dir in upload_dir.iterdir():
+            if not category_dir.is_dir():
+                continue
+            cat = category_dir.name
+
+            if category and category != cat:
+                continue
+
+            for file_path in category_dir.glob("*.*"):
+                if not file_path.is_file():
+                    continue
+                stat = file_path.stat()
+                documents.append({
+                    "id": f"{cat}|{file_path.name}",
+                    "filename": file_path.name,
+                    "category": cat,
+                    "chunks": "-",
+                    "size": stat.st_size,
+                    "upload_date": dt.fromtimestamp(stat.st_mtime).isoformat()
+                })
+
+        return documents
 
 
 # ==================== 便捷函数 ====================

@@ -35,10 +35,11 @@ os.environ["LANGCHAIN_ENDPOINT"] = ""
 import sys
 sys.path.append(str(Path(__file__).parent))
 
-from core.agents import CustomerServiceSystem
+from core.agents import EnterpriseQASystem
 from core.knowledge import get_kb_manager
 from core.rag import create_rag_engine
 from core.hybrid_rag import create_hybrid_rag_engine
+from core.performance import default_cache, default_session_manager, default_rate_limiter
 
 # 导入模型
 from models.chat import (
@@ -56,9 +57,9 @@ from models.chat import (
 # ==================== 创建 FastAPI 应用 ====================
 
 app = FastAPI(
-    title="多代理智能客服系统 API",
-    description="基于 LangChain 1.0 + LangGraph 的多代理智能客服系统，支持 RAG 知识库检索",
-    version="1.0.0"
+    title="企业智能问答系统 API",
+    description="基于 LangChain 1.0 + LangGraph 的制造企业智能问答系统，支持 RAG 知识库检索与多代理协同",
+    version="2.0.0"
 )
 
 # 添加 CORS 中间件
@@ -99,8 +100,9 @@ except Exception as e:
     rag_engine = None
 
 # 初始化多代理系统
-print("[Agent] Initializing multi-agent system...")
-cs_system = CustomerServiceSystem(rag_engine=rag_engine)
+print("[Agent] Initializing enterprise QA system...")
+cs_system = EnterpriseQASystem(rag_engine=rag_engine, enable_cache=True)
+print("[OK] Enterprise QA system initialized with caching enabled")
 
 # 初始化知识库管理器（启用 RAG）
 print("[KB] Initializing knowledge base manager...")
@@ -115,14 +117,25 @@ print("[OK] System initialization complete")
 async def root():
     """根路径"""
     return {
-        "name": "多代理智能客服系统 API",
-        "version": "1.0.0",
+        "name": "企业智能问答系统 API",
+        "version": "2.0.0",
         "status": "running",
+        "features": {
+            "hybrid_search": "BM25 + 向量检索 + RRF 融合",
+            "multi_agent": "意图分类 + 4大专业代理",
+            "query_rewrite": "查询重写 + 多查询扩展",
+            "reranking": "LLM 重排序 + 去重过滤",
+            "caching": "响应缓存 + 搜索缓存",
+            "bm25_persistence": "BM25 索引持久化"
+        },
         "endpoints": {
             "chat": "/api/chat",
+            "chat_stream": "/api/chat/stream",
             "upload": "/api/upload",
             "knowledge": "/api/knowledge",
-            "stats": "/api/stats"
+            "stats": "/api/stats",
+            "cache_stats": "/api/performance/cache",
+            "sessions": "/api/performance/sessions"
         }
     }
 
@@ -227,7 +240,7 @@ async def upload_document(
     """
     try:
         # 验证类别
-        valid_categories = ["products", "technical", "faq"]
+        valid_categories = ["products", "capabilities", "company", "faq"]
         if category not in valid_categories:
             raise HTTPException(
                 status_code=400,
@@ -333,6 +346,93 @@ async def get_statistics():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ==================== 性能监控接口 ====================
+
+@app.get("/api/performance/cache")
+async def get_cache_stats():
+    """
+    获取缓存统计信息
+    """
+    try:
+        stats = default_cache.get_stats()
+        return {
+            "status": "success",
+            "cache": stats
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/performance/cache/clear")
+async def clear_cache():
+    """
+    清空缓存
+    """
+    try:
+        default_cache.clear()
+        return {
+            "status": "success",
+            "message": "缓存已清空"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/performance/sessions")
+async def list_sessions(limit: int = 50):
+    """
+    获取会话列表
+    """
+    try:
+        sessions = default_session_manager.list_sessions(limit=limit)
+        return {
+            "status": "success",
+            "sessions": sessions,
+            "total": len(sessions)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/performance/sessions/{session_id}")
+async def get_session(session_id: str):
+    """
+    获取指定会话的详细信息
+    """
+    try:
+        session = default_session_manager.get_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        return {
+            "status": "success",
+            "session": session
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/performance/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """
+    删除指定会话
+    """
+    try:
+        success = default_session_manager.delete_session(session_id)
+        if success:
+            return {
+                "status": "success",
+                "message": f"会话 {session_id} 已删除"
+            }
+        else:
+            raise HTTPException(status_code=404, detail="会话不存在")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== 主程序 ====================
 
 def main():
@@ -341,7 +441,7 @@ def main():
     port = int(os.getenv("PORT", 8000))
 
     print(f"\n{'='*60}")
-    print(f"[START] Multi-Agent Customer Service System - FastAPI Backend")
+    print(f"[START] Enterprise Intelligent QA System - FastAPI Backend")
     print(f"{'='*60}")
     print(f"\nServer starting...")
     print(f"URL: http://{host}:{port}")
